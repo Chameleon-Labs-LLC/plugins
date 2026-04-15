@@ -1,0 +1,32 @@
+{
+  "name": "chameleon-labs",
+  "owner": {
+    "name": "Chameleon Labs LLC",
+    "email": "hello@chameleonlabs.ai"
+  },
+  "metadata": {
+    "description": "Plugins from Chameleon Labs — skills, agents, and tooling for Claude Code.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "agent-spawner",
+      "source": {
+        "source": "github",
+        "repo": "Chameleon-Labs-LLC/agent-spawner"
+      },
+      "description": "Scaffold, package, and deploy Claude agents — channel adapters (Telegram/Slack/Discord), HMAC-signed bridges between local + managed, IDE configs, systemd/Task Scheduler units, and SCP/SSH deploy to a Linux host.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Chameleon Labs LLC"
+      },
+      "homepage": "https://github.com/Chameleon-Labs-LLC/agent-spawner",
+      "repository": "https://github.com/Chameleon-Labs-LLC/agent-spawner",
+      "license": "MIT",
+      "category": "development",
+      "keywords": ["agents", "scaffolding", "deploy", "telegram", "slack", "discord", "managed-agents", "agent-sdk"],
+      "skills": "./.claude/skills",
+      "strict": false
+    }
+  ]
+}
