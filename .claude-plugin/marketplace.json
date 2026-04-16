@@ -24,9 +24,7 @@
       "repository": "https://github.com/Chameleon-Labs-LLC/agent-spawner",
       "license": "MIT",
       "category": "development",
-      "keywords": ["agents", "scaffolding", "deploy", "telegram", "slack", "discord", "managed-agents", "agent-sdk"],
-      "skills": "./.claude/skills",
-      "strict": false
+      "keywords": ["agents", "scaffolding", "deploy", "telegram", "slack", "discord", "managed-agents", "agent-sdk"]
     }
   ]
 }
