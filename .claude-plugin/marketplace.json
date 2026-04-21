@@ -25,6 +25,23 @@
       "license": "MIT",
       "category": "development",
       "keywords": ["agents", "scaffolding", "deploy", "telegram", "slack", "discord", "managed-agents", "agent-sdk"]
+    },
+    {
+      "name": "license-validator",
+      "source": {
+        "source": "github",
+        "repo": "Chameleon-Labs-LLC/license-validator"
+      },
+      "description": "Shared license verification for Chameleon Labs commercial plugins. Install once; all Chameleon Labs paid plugins use it to verify licenses and cache a 24-hour offline token.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Chameleon Labs LLC"
+      },
+      "homepage": "https://github.com/Chameleon-Labs-LLC/license-validator",
+      "repository": "https://github.com/Chameleon-Labs-LLC/license-validator",
+      "license": "MIT",
+      "category": "utilities",
+      "keywords": ["license", "licensing", "verification", "ed25519", "offline-token", "commercial"]
     }
   ]
 }
