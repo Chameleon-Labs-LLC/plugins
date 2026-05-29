@@ -8,15 +8,17 @@ In Claude Code:
 
 ```
 /plugin marketplace add Chameleon-Labs-LLC/plugins
-/plugin install agent-spawner@chameleon-labs
+/plugin install scan-source@chameleon-labs
 ```
 
 Or from the shell:
 
 ```bash
 claude plugin marketplace add Chameleon-Labs-LLC/plugins
-claude plugin install agent-spawner@chameleon-labs
+claude plugin install scan-source@chameleon-labs
 ```
+
+Swap `scan-source` for any plugin name from the table below (e.g. `agent-spawner@chameleon-labs`).
 
 After installing, verify:
 
@@ -35,8 +37,10 @@ Update later:
 | Plugin | Description | Source |
 |---|---|---|
 | `agent-spawner` | Scaffold, package, and deploy Claude agents (Telegram/Slack/Discord channels, local + managed + hybrid runtimes, HMAC-signed bridges, SCP/SSH deploy to Linux). | [Chameleon-Labs-LLC/agent-spawner](https://github.com/Chameleon-Labs-LLC/agent-spawner) |
+| `license-validator` | Shared license verification for Chameleon Labs commercial plugins. Install once; all paid plugins use it to verify licenses and cache a 24-hour offline token. | [Chameleon-Labs-LLC/license-validator](https://github.com/Chameleon-Labs-LLC/license-validator) |
+| `scan-source` | Layered local security scan for downloaded/cloned source — malware/supply-chain (GuardDog), known CVEs + leaked secrets (Trivy, OSV-Scanner, pip-audit), and insecure-code SAST (Semgrep). Interprets results and recommends concrete fixes. | [bundled in this repo](./scan-source) |
 
-More plugins land here as we build them. Each plugin lives in its own repo; this marketplace is just the index.
+More plugins land here as we build them. Most plugins live in their own repo and are referenced by this index; some smaller ones (like `scan-source`) are bundled directly in this repo under their own directory.
 
 ## Team rollout
 
