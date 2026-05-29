@@ -1,0 +1,15 @@
+# scan-download — GuardDog allowlist
+#
+# One substring per line. Any GuardDog indicator whose match block contains a
+# line listed here is treated as known-benign and subtracted from the count.
+# Blank lines and lines starting with '#' are ignored.
+#
+# SAFETY: entries are GLOBAL (apply to every repo you scan). Keep them specific.
+# A broad entry like "telegram" could hide a real exfiltration indicator in some
+# other package. Prefer exact, narrow strings. Everything stays in the full log
+# regardless — the allowlist only changes the pass/fail verdict.
+#
+# Examples (uncomment / adapt as you vet findings):
+#
+# api.telegram.org          # legit Telegram bot notification endpoint
+# TOOL_ICON_MAP[prefix      # benign TypeScript dynamic dispatch (icon lookup)

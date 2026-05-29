@@ -1,0 +1,3 @@
+.scan-reports/
+*.log
+.DS_Store
