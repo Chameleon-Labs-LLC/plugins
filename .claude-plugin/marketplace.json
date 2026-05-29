@@ -51,8 +51,8 @@
       "author": {
         "name": "Chameleon Labs LLC"
       },
-      "homepage": "https://github.com/Chameleon-Labs-LLC/scan-source",
-      "repository": "https://github.com/Chameleon-Labs-LLC/scan-source",
+      "homepage": "https://github.com/Chameleon-Labs-LLC/plugins/tree/main/scan-source",
+      "repository": "https://github.com/Chameleon-Labs-LLC/plugins",
       "license": "MIT",
       "category": "security",
       "keywords": ["security", "supply-chain", "malware", "cve", "sast", "audit", "guarddog", "trivy", "semgrep", "osv-scanner"]
