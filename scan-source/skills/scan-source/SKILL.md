@@ -1,16 +1,18 @@
 ---
 name: scan-source
 description: >-
-  Run a layered local security scan on a downloaded or cloned source tree, then
-  interpret the results and recommend concrete fixes. Use this whenever the user
-  is about to install, run, clone, or download open-source code and wants to know
-  if it is safe — e.g. "is this repo/package safe to use", "scan this for malware",
-  "check this download before I run it", "audit the dependencies", "any supply-chain
-  risk here", or names a folder/repo they just pulled. Catches the two distinct
-  threats antivirus misses: malicious packages (the recent npm/PyPI-style attacks)
-  AND known CVEs + leaked secrets + insecure code. Prefer this skill over ad-hoc
-  `npm audit`/`pip-audit` calls because it runs all layers and explains what the
-  findings actually mean. Trigger even if the user doesn't say the word "scan".
+  Use this skill when the user wants to know whether third-party code they did NOT
+  write is safe to use — a cloned repo, downloaded archive, a dependency/package
+  they're about to add, or something already sitting in node_modules. Triggers on
+  intent like: "is this repo/folder safe to run/install", "check ~/path for malware
+  or sketchy install scripts", "could this package be a typosquat or compromised",
+  "does this phone home / read env vars / exfiltrate", "anything dangerous in this
+  download", "audit this dependency tree", or naming a folder/repo they just pulled
+  and asking if it's risky — even if they never say "scan". This runs a local,
+  layered scan that catches supply-chain malware (npm/PyPI-style attacks) plus known
+  CVEs, leaked secrets, and insecure code, then explains which findings actually
+  matter. NOT for reviewing the user's own code quality, threat-modeling their own
+  app, or checking a URL/link.
 ---
 
 # scan-source
