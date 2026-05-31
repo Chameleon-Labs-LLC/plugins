@@ -1,0 +1,22 @@
+{
+  "name": "humanizer",
+  "description": "Strips AI fingerprints from writing and rewrites it in your own voice. A catalog of 200+ AI tells to avoid plus a fill-in-yourself voice profile, applied to clean up AI-sounding text or to draft fresh prose that doesn't read like a chatbot wrote it.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Chameleon Labs LLC",
+    "email": "hello@chameleonlabs.ai"
+  },
+  "homepage": "https://github.com/Chameleon-Labs-LLC/plugins/tree/main/humanizer",
+  "repository": "https://github.com/Chameleon-Labs-LLC/plugins",
+  "license": "MIT",
+  "keywords": [
+    "writing",
+    "ai-detection",
+    "humanize",
+    "voice",
+    "editing",
+    "style",
+    "anti-slop",
+    "content"
+  ]
+}
