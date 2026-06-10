@@ -28,7 +28,7 @@ Run `git config user.name`. Confirm with the user: "Should I build the profile f
 mkdir -p ~/.claude/humanizer/raw_samples
 ```
 
-Copy the bundled template into place. The template lives in the sibling skill: `<this skill's base directory>/../humanizer/references/voice_profile.md`. Copy it to `~/.claude/humanizer/voice_profile.md`.
+Copy the bundled template into place. The template lives in the sibling skill: `${CLAUDE_PLUGIN_ROOT}/skills/humanizer/references/voice_profile.md` (equivalently, `../humanizer/references/voice_profile.md` relative to this skill's base directory). Copy it to `~/.claude/humanizer/voice_profile.md`.
 
 If `~/.claude/humanizer/voice_profile.md` already exists, don't overwrite it — treat this run as an update (see "Re-runs and updates").
 
