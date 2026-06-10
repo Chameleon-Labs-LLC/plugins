@@ -21,13 +21,18 @@ Most AI prose carries a fingerprint: a cluster of overused words, predictable se
 Two reference files do the work:
 
 - **`references/writing_guardrails.md`** — the catalog of AI tells to avoid. Banned words, phrases, sentence structures, punctuation habits, formatting patterns. These are negative rules: things to *never* do. They apply to everything, every time.
-- **`references/voice_profile.md`** — the user's voice profile. Rhythm, vocabulary, humor, how they open and close, what they value in writing. These are positive rules: the target the rewrite aims for.
+- **The voice profile** — `~/.claude/humanizer/voice_profile.md` if it exists, otherwise the bundled `references/voice_profile.md` template. Rhythm, vocabulary, humor, how they open and close, what they value in writing. These are positive rules: the target the rewrite aims for.
 
 The point is not to pass an "AI detector." The point is that the writing sounds like a specific person actually said it.
 
-## Make it yours first
+## The voice profile
 
-`references/voice_profile.md` ships as a template with sane STARTER DEFAULTS and a YOUR VERSION line under each section. It works out of the box, but it gets dramatically better once the user fills in even a section or two with their actual voice. If the output sounds generic, the fix is almost always a richer voice profile — point the user at that file. A pasted writing sample (a post, an email, a paragraph they're proud of) is the fastest way to fill it in well.
+Resolve the profile in this order:
+
+1. **`~/.claude/humanizer/voice_profile.md`** — the user's personal profile, built by the `humanizer-setup` skill. It lives outside the plugin on purpose: plugin updates never overwrite it.
+2. **`references/voice_profile.md`** — the bundled template with sane STARTER DEFAULTS. A workable baseline, but it's nobody's actual voice.
+
+If you fall back to the template on a real writing task, offer once (not on every task): "Want me to build your voice profile from your actual writing? Say *set up humanizer*." Then get on with the writing — the template still works.
 
 ## When this fires
 
@@ -44,7 +49,7 @@ Always load both reference files before writing or rewriting. Read them fully �
 
 1. **Read `references/writing_guardrails.md`.** This is your "do not" list. The most important sections, because they're the most common tells: the banned verbs/adjectives/nouns (§1), the "it's not X, it's Y" negation pattern and self-posed questions (§4), em-dash overuse (§3), and the rhythm/burstiness tells (§6).
 
-2. **Read `references/voice_profile.md`.** This is your target voice. Where a section still shows a STARTER DEFAULT rather than a filled-in YOUR VERSION, use the default — it's a sane baseline — but know the filled-in sections carry more weight.
+2. **Read the voice profile** (resolved per "The voice profile" above). This is your target voice. Where a section still shows a STARTER DEFAULT rather than a filled-in YOUR VERSION, use the default — it's a sane baseline — but know the filled-in sections carry more weight.
 
 3. **Write or rewrite.** Hold both in mind at once. Strip every tell; aim for the voice.
 
@@ -68,4 +73,4 @@ When everything else is right but the writing still feels off, it's almost alway
 
 ## Updating the voice profile
 
-The voice profile improves over time. If the user reacts to a rewrite ("too stiff," "I'd never say 'leverage'," "that's exactly right"), that's signal — fold it into `references/voice_profile.md` so the next rewrite starts closer. The guardrails file rarely changes; the voice file is meant to.
+The voice profile improves over time. If the user reacts to a rewrite ("too stiff," "I'd never say 'leverage'," "that's exactly right"), that's signal — fold it into `~/.claude/humanizer/voice_profile.md` so the next rewrite starts closer. If that file doesn't exist yet, copy the bundled template there first, then fold the correction in. Never write corrections into the bundled `references/voice_profile.md` — plugin updates overwrite it. The guardrails file rarely changes; the voice file is meant to.
