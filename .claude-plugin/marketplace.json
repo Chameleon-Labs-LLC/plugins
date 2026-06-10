@@ -60,8 +60,8 @@
     {
       "name": "humanizer",
       "source": "./humanizer",
-      "description": "Strips AI fingerprints from writing and rewrites it in your own voice. A catalog of 200+ AI tells to avoid plus a fill-in-yourself voice profile, applied to clean up AI-sounding text or to draft fresh prose that doesn't read like a chatbot wrote it.",
-      "version": "0.1.0",
+      "description": "Strips AI fingerprints from writing and rewrites it in your own voice. A catalog of 200+ AI tells to avoid plus a personal voice profile, applied to clean up AI-sounding text or to draft fresh prose that doesn't read like a chatbot wrote it. Includes a guided setup that builds your voice profile from your own writing.",
+      "version": "0.2.0",
       "author": {
         "name": "Chameleon Labs LLC"
       },

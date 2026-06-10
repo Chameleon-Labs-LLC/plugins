@@ -14,11 +14,13 @@ Two reference files drive every rewrite:
 | File | Role |
 |------|------|
 | `skills/humanizer/references/writing_guardrails.md` | 200+ AI tells to avoid (the negative rules) |
-| `skills/humanizer/references/voice_profile.md` | Your personal voice profile (the positive rules) |
+| `~/.claude/humanizer/voice_profile.md` | Your personal voice profile, built by setup (the positive rules; a bundled template is the fallback) |
 
 ## Make it yours
 
-`voice_profile.md` ships as a template with sane defaults and a `YOUR VERSION` line under each section. It works out of the box, but it gets much better once you fill in even a section or two with your actual voice. The fastest way: paste a paragraph you've written and are happy with, and let the skill fill the profile from it.
+After installing, say **"set up humanizer"**. A guided setup builds your personal voice profile from your real writing: samples you paste, files on disk you pick from a list, or sent emails you select (only if you have an email integration connected, and only the messages you choose). Your profile is saved to `~/.claude/humanizer/voice_profile.md`, outside the plugin, so plugin updates never overwrite it.
+
+Skip setup and it still works — the bundled template has sane defaults. But even one real writing sample makes the output noticeably more you.
 
 ## Install
 
@@ -27,7 +29,7 @@ Two reference files drive every rewrite:
 /plugin install humanizer@chameleon-labs
 ```
 
-Then ask Claude to "humanize this" or "write this in my voice." Edit `voice_profile.md` to teach it who you are.
+Then say **"set up humanizer"** to build your voice profile, and ask Claude to "humanize this" or "write this in my voice."
 
 ## Credit
 
