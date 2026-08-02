@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Plugins from Chameleon Labs — skills, agents, and tooling for Claude Code.",
-    "version": "0.2.0"
+    "version": "0.3.0"
   },
   "plugins": [
     {
@@ -24,7 +24,16 @@
       "repository": "https://github.com/Chameleon-Labs-LLC/agent-spawner",
       "license": "MIT",
       "category": "development",
-      "keywords": ["agents", "scaffolding", "deploy", "telegram", "slack", "discord", "managed-agents", "agent-sdk"]
+      "keywords": [
+        "agents",
+        "scaffolding",
+        "deploy",
+        "telegram",
+        "slack",
+        "discord",
+        "managed-agents",
+        "agent-sdk"
+      ]
     },
     {
       "name": "license-validator",
@@ -41,7 +50,14 @@
       "repository": "https://github.com/Chameleon-Labs-LLC/license-validator",
       "license": "MIT",
       "category": "utilities",
-      "keywords": ["license", "licensing", "verification", "ed25519", "offline-token", "commercial"]
+      "keywords": [
+        "license",
+        "licensing",
+        "verification",
+        "ed25519",
+        "offline-token",
+        "commercial"
+      ]
     },
     {
       "name": "scan-source",
@@ -55,7 +71,18 @@
       "repository": "https://github.com/Chameleon-Labs-LLC/plugins",
       "license": "MIT",
       "category": "security",
-      "keywords": ["security", "supply-chain", "malware", "cve", "sast", "audit", "guarddog", "trivy", "semgrep", "osv-scanner"]
+      "keywords": [
+        "security",
+        "supply-chain",
+        "malware",
+        "cve",
+        "sast",
+        "audit",
+        "guarddog",
+        "trivy",
+        "semgrep",
+        "osv-scanner"
+      ]
     },
     {
       "name": "humanizer",
@@ -69,7 +96,104 @@
       "repository": "https://github.com/Chameleon-Labs-LLC/plugins",
       "license": "MIT",
       "category": "content",
-      "keywords": ["writing", "ai-detection", "humanize", "voice", "editing", "style", "anti-slop", "content"]
+      "keywords": [
+        "writing",
+        "ai-detection",
+        "humanize",
+        "voice",
+        "editing",
+        "style",
+        "anti-slop",
+        "content"
+      ]
+    },
+    {
+      "name": "repo-hygiene",
+      "source": "./repo-hygiene",
+      "description": "Keep any repo's agent-facing layer healthy — version-manager (standardized version bumps + changelogs, auto-detects where the version lives), repo-doctor (audit of AGENTS.md/CLAUDE.md topology, CodeMap freshness, token cost, doc drift), claude-md-optimizer (rightsize CLAUDE.md per Anthropic context-engineering guidance), and unify-agents-md (make AGENTS.md the single canonical guide every coding CLI follows).",
+      "version": "0.1.0",
+      "author": {
+        "name": "Chameleon Labs LLC"
+      },
+      "homepage": "https://github.com/Chameleon-Labs-LLC/plugins/tree/main/repo-hygiene",
+      "repository": "https://github.com/Chameleon-Labs-LLC/plugins",
+      "license": "MIT",
+      "category": "development",
+      "keywords": [
+        "versioning",
+        "changelog",
+        "release",
+        "agents-md",
+        "claude-md",
+        "audit",
+        "context-engineering",
+        "documentation"
+      ]
+    },
+    {
+      "name": "docs-toolkit",
+      "source": "./docs-toolkit",
+      "description": "Generate and maintain project documentation — project-documenter (user-facing feature docs + sitemap), technical-documenter (developer/API docs), feature-documenter (feature inventory), update-code-map (navigable CodeMap.md with verified line numbers; spec bundled), and raginclude-generator (.raginclude files for RAG indexing).",
+      "version": "0.1.0",
+      "author": {
+        "name": "Chameleon Labs LLC"
+      },
+      "homepage": "https://github.com/Chameleon-Labs-LLC/plugins/tree/main/docs-toolkit",
+      "repository": "https://github.com/Chameleon-Labs-LLC/plugins",
+      "license": "MIT",
+      "category": "documentation",
+      "keywords": [
+        "documentation",
+        "docs",
+        "codemap",
+        "sitemap",
+        "rag",
+        "features",
+        "api-docs"
+      ]
+    },
+    {
+      "name": "yt-transcript",
+      "source": "./yt-transcript",
+      "description": "Download YouTube transcripts from any URL form (watch, youtu.be, shorts, embed) or bare video ID into a local project's Notes directory, with full venv lifecycle handled by a bundled runner.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Chameleon Labs LLC"
+      },
+      "homepage": "https://github.com/Chameleon-Labs-LLC/plugins/tree/main/yt-transcript",
+      "repository": "https://github.com/Chameleon-Labs-LLC/plugins",
+      "license": "MIT",
+      "category": "utilities",
+      "keywords": [
+        "youtube",
+        "transcript",
+        "captions",
+        "subtitles",
+        "download"
+      ]
+    },
+    {
+      "name": "model-registry",
+      "source": "./model-registry",
+      "description": "Wire any project to a daily-refreshed public registry of current LLM model IDs (Claude, GPT, Gemini) so code stops hardcoding model names that go stale. Installs the zero-dependency Python/TypeScript client, migrates hardcoded IDs, and manages bundled fallbacks.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Chameleon Labs LLC"
+      },
+      "homepage": "https://github.com/Chameleon-Labs-LLC/plugins/tree/main/model-registry",
+      "repository": "https://github.com/Chameleon-Labs-LLC/plugins",
+      "license": "MIT",
+      "category": "development",
+      "keywords": [
+        "llm",
+        "models",
+        "model-ids",
+        "registry",
+        "anthropic",
+        "openai",
+        "gemini",
+        "fallback"
+      ]
     }
   ]
 }

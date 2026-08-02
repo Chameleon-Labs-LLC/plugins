@@ -1,0 +1,19 @@
+{
+  "name": "yt-transcript",
+  "description": "Download YouTube transcripts from any URL form (watch, youtu.be, shorts, embed) or bare video ID into a local project's Notes directory, with full venv lifecycle handled by a bundled runner.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Chameleon Labs LLC",
+    "email": "hello@chameleonlabs.ai"
+  },
+  "homepage": "https://github.com/Chameleon-Labs-LLC/plugins/tree/main/yt-transcript",
+  "repository": "https://github.com/Chameleon-Labs-LLC/plugins",
+  "license": "MIT",
+  "keywords": [
+    "youtube",
+    "transcript",
+    "captions",
+    "subtitles",
+    "download"
+  ]
+}
