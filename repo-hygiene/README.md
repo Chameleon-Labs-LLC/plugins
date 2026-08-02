@@ -9,6 +9,10 @@ Keep any repo's agent-facing layer healthy — version-manager (standardized ver
 - **unify-agents-md** — Restructure a project's (or the whole machine's) AI-agent instruction files so AGENTS.md is the single canonical guide that every coding CLI follows — Claude Code, Codex, Copilot, Antigravity/agy, Gemini, Pi — with CLAUDE.md and GEMINI.md reduced to thin @import pointers plus tool-specific extras.
 - **version-manager** — Use when bumping a version, cutting a release, or when a CHANGELOG is stale, missing versions, or disagrees with the code — and before opening any PR, per the versioning rule in AGENTS.md.
 
+## Note
+
+`repo-doctor` can dispatch to `update-code-map` for stale CodeMap remediation — that skill ships in the `docs-toolkit` plugin from this same marketplace. Everything else in this plugin is self-contained.
+
 ## Install
 
 ```

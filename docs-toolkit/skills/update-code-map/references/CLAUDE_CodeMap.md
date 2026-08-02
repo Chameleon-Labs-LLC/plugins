@@ -268,12 +268,11 @@ Document optimization strategies:
 ## Language-Specific Extensions
 
 For language-specific details, refer to supplementary files:
-- **C#/.NET**: See `CLAUDE_CodeMap_CSharp.md`
-- **Python**: See `CLAUDE_CodeMap_Python.md`
-- **JavaScript/TypeScript**: See `CLAUDE_CodeMap_JavaScript.md`
-- **Java**: See `CLAUDE_CodeMap_Java.md`
-- **Go**: See `CLAUDE_CodeMap_Go.md`
-- **Rust**: See `CLAUDE_CodeMap_Rust.md`
+- **C#/.NET**: see `csharp-guidelines.md` (bundled alongside this spec)
+- **Python**: see `python-guidelines.md`
+- **JavaScript/TypeScript**: see `javascript-guidelines.md`
+- **XAML**: see `xaml-guidelines.md`
+- **Other languages** (Java, Go, Rust, …): follow the general conventions above; no language-specific guide is bundled
 
 ## Formatting Requirements
 

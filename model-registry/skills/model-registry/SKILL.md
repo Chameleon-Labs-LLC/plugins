@@ -8,7 +8,7 @@ description: Use when a project hardcodes LLM model IDs (claude-*, gpt-*, gemini
 Wire a project to the published model registry so it resolves **current** LLM model IDs
 at runtime instead of hardcoding IDs that go stale.
 
-- **Registry URL:** `https://chameleonlabs-model-registry.s3.us-east-1.amazonaws.com/models/latest.json` (public, refreshed daily ~3 AM by `agents/model-discovery/` in the ChameleonLabs repo)
+- **Registry URL:** `https://chameleonlabs-model-registry.s3.us-east-1.amazonaws.com/models/latest.json` (public, refreshed daily)
 - **Canonical clients (source of truth):** https://github.com/Chameleon-Labs-LLC/model-registry-client — Python (`python/src/model_registry/client.py`) + TypeScript (`typescript/registry.ts`), both zero-dependency and vendorable
 - **Env override:** `MODEL_REGISTRY_URL` points clients at a different registry
 
@@ -45,9 +45,8 @@ Families: anthropic `opus|sonnet|haiku`; openai `gpt|gpt-mini|gpt-nano|gpt-pro|c
 
 1-hour in-memory TTL cache; 5s fetch timeout; honor `MODEL_REGISTRY_URL`; validate `schema_version >= 2` + `families` present. Failure ladder: **serve cache (even expired) → serve bundled fallback → only then error.** With a fallback configured, never throw — model pickers must always work. Log failures to stderr/console. Ports use the language's idiomatic embed for the fallback (e.g. Rust `include_str!`); everything else above is the contract.
 
-## Gotchas (production-proven, ChameleonLabs PR #223)
+## Gotchas (production-proven)
 
 - **Node 24 native TS:** JSON imports need `with { type: "json" }` (`ERR_IMPORT_ATTRIBUTE_MISSING` otherwise).
 - **Sync defaults:** modules needing a sync model ID at import time read the **bundled fallback JSON**, not a hardcoded ID — no drift, still synchronous.
 - **Amplify:** refresh the fallback in the `preBuild` phase so each deploy ships a fresh last-known-good.
-- ChameleonLabs (the web repo) already has its own wired consumer (`lib/ai/registry.ts`) — don't reinstall there.

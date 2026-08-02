@@ -42,9 +42,10 @@ Update later:
 | `humanizer` | Strips AI fingerprints from prose and rewrites it in a personal voice, with a guided setup that builds your voice profile. | [bundled in this repo](./humanizer) |
 | `repo-hygiene` | Keep any repo's agent-facing layer healthy: standardized version bumps + changelogs (`version-manager`), agent-docs audits (`repo-doctor`), CLAUDE.md rightsizing (`claude-md-optimizer`), and canonical AGENTS.md unification across coding CLIs (`unify-agents-md`). | [bundled in this repo](./repo-hygiene) |
 | `docs-toolkit` | Generate and maintain project documentation: user-facing feature docs + sitemap, developer/API docs, feature inventories, a verified CodeMap.md, and `.raginclude` files for RAG indexing. | [bundled in this repo](./docs-toolkit) |
-| `graphify` | Turn any folder of files — code, docs, papers, images — into a navigable knowledge graph with community detection: interactive HTML, GraphRAG-ready JSON, and an audit report. | [bundled in this repo](./graphify) |
 | `yt-transcript` | Download YouTube transcripts from any URL form or bare video ID, with the Python venv lifecycle handled by a bundled runner. | [bundled in this repo](./yt-transcript) |
 | `model-registry` | Wire any project to a daily-refreshed public registry of current LLM model IDs (Claude, GPT, Gemini) so code stops hardcoding model names that go stale. | [bundled in this repo](./model-registry) |
+
+Looking for a knowledge-graph skill? We recommend [Graphify](https://github.com/Graphify-Labs/graphify) by Safi Shamsi (`uv tool install graphifyy`) — it ships its own Claude Code skill, so we don't repackage it here.
 
 More plugins land here as we build them. Most plugins live in their own repo and are referenced by this index; some smaller ones (like `scan-source`) are bundled directly in this repo under their own directory.
 

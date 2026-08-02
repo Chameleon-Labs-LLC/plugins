@@ -97,7 +97,7 @@ Task tool call:
   subagent_type: "general-purpose"
   name: "doc-{area-slug}"
   description: "Document {area name} features"
-  mode: "bypassPermissions"
+  mode: "acceptEdits"
   prompt: |
     You are documenting the {area name} features of {project name}.
 

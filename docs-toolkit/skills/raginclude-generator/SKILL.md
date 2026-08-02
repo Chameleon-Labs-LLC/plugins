@@ -137,7 +137,7 @@ REMOVE patterns that would expose:
 
 **`CLAUDE.md` caveat:** `CLAUDE.md` is valuable for RAG context but must be audited before inclusion. It commonly contains infrastructure secrets: server IPs, SSH key paths, EC2 instance IDs, internal deployment commands, and admin credentials. If `CLAUDE.md` contains such details, either exclude it or confirm a sanitized version exists for RAG indexing. Prefer `AGENTS.md` if it covers only behavioral context.
 
-### 4. Write .raginclude
+### 5. Write .raginclude
 
 ```
 # Project: {name} — .raginclude for RAG knowledge base
@@ -168,7 +168,7 @@ REMOVE patterns that would expose:
 {conditional patterns}
 ```
 
-### 5. Verify
+### 6. Verify
 
 After writing:
 1. Show active pattern count (non-comment, non-blank lines)

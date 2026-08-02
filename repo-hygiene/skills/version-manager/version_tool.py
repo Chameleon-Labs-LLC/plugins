@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Version Manager — cross-project version bumping and changelog currency.
 
-Design: ImageAI/Plans/VersionManager-Design.md
 
 Standard library only. Operates on a repository from the outside; adds no
 per-repository config file. Every verb is read-only until it prints its plan;
@@ -279,7 +278,7 @@ class Entry:
 def _history_paths(repo: Path, canonical: Location | None) -> list[Path]:
     """Paths that ever plausibly held a version, including relocated homes.
 
-    ImageAI kept __version__ in main.py before it moved to core/constants.py;
+    Some projects keep __version__ in a main module before it moves to a constants file;
     without walking the old home its 0.3.0-0.6.0 releases are unrecoverable.
     """
     names = {"VERSION", "version.py", "constants.py", "__init__.py",

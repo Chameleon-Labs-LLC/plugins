@@ -9,7 +9,7 @@ Downloads a YouTube transcript via the `yt_transcript.py` script in a local `yt-
 
 ## Prerequisites
 
-This skill expects a local clone of a `yt-transcript` project (containing `yt_transcript.py` and `requirements.txt`). Set the project path via the `YT_TRANSCRIPT_PROJECT` env var, or edit `scripts/run.sh` to point at wherever you cloned it (default assumes `~/code/yt-transcript`).
+This skill drives the [lelandg/yt-transcript](https://github.com/lelandg/yt-transcript) project (`yt_transcript.py` + `requirements.txt`). On first run, `scripts/run.sh` clones it automatically to `~/code/yt-transcript` if it isn't there. To use an existing clone instead, set the `YT_TRANSCRIPT_PROJECT` env var to its path (and `YT_TRANSCRIPT_REPO` to override the clone URL). Requires `git` and `python3`.
 
 ## When to use
 

@@ -5,7 +5,7 @@
     "email": "hello@chameleonlabs.ai"
   },
   "metadata": {
-    "description": "Plugins from Chameleon Labs \u2014 skills, agents, and tooling for Claude Code.",
+    "description": "Plugins from Chameleon Labs — skills, agents, and tooling for Claude Code.",
     "version": "0.3.0"
   },
   "plugins": [
@@ -15,7 +15,7 @@
         "source": "github",
         "repo": "Chameleon-Labs-LLC/agent-spawner"
       },
-      "description": "Scaffold, package, and deploy Claude agents \u2014 channel adapters (Telegram/Slack/Discord), HMAC-signed bridges between local + managed, IDE configs, systemd/Task Scheduler units, and SCP/SSH deploy to a Linux host.",
+      "description": "Scaffold, package, and deploy Claude agents — channel adapters (Telegram/Slack/Discord), HMAC-signed bridges between local + managed, IDE configs, systemd/Task Scheduler units, and SCP/SSH deploy to a Linux host.",
       "version": "0.1.0",
       "author": {
         "name": "Chameleon Labs LLC"
@@ -62,7 +62,7 @@
     {
       "name": "scan-source",
       "source": "./scan-source",
-      "description": "Layered local security scan for downloaded/cloned source \u2014 malware/supply-chain (GuardDog), known CVEs + leaked secrets (Trivy, OSV-Scanner, pip-audit), and insecure-code SAST (Semgrep). Interprets results and recommends concrete fixes.",
+      "description": "Layered local security scan for downloaded/cloned source — malware/supply-chain (GuardDog), known CVEs + leaked secrets (Trivy, OSV-Scanner, pip-audit), and insecure-code SAST (Semgrep). Interprets results and recommends concrete fixes.",
       "version": "0.1.0",
       "author": {
         "name": "Chameleon Labs LLC"
@@ -110,7 +110,7 @@
     {
       "name": "repo-hygiene",
       "source": "./repo-hygiene",
-      "description": "Keep any repo's agent-facing layer healthy \u2014 version-manager (standardized version bumps + changelogs, auto-detects where the version lives), repo-doctor (audit of AGENTS.md/CLAUDE.md topology, CodeMap freshness, token cost, doc drift), claude-md-optimizer (rightsize CLAUDE.md per Anthropic context-engineering guidance), and unify-agents-md (make AGENTS.md the single canonical guide every coding CLI follows).",
+      "description": "Keep any repo's agent-facing layer healthy — version-manager (standardized version bumps + changelogs, auto-detects where the version lives), repo-doctor (audit of AGENTS.md/CLAUDE.md topology, CodeMap freshness, token cost, doc drift), claude-md-optimizer (rightsize CLAUDE.md per Anthropic context-engineering guidance), and unify-agents-md (make AGENTS.md the single canonical guide every coding CLI follows).",
       "version": "0.1.0",
       "author": {
         "name": "Chameleon Labs LLC"
@@ -133,7 +133,7 @@
     {
       "name": "docs-toolkit",
       "source": "./docs-toolkit",
-      "description": "Generate and maintain project documentation \u2014 project-documenter (user-facing feature docs + sitemap), technical-documenter (developer/API docs), feature-documenter (feature inventory), update-code-map (navigable CodeMap.md with verified line numbers; spec bundled), and raginclude-generator (.raginclude files for RAG indexing).",
+      "description": "Generate and maintain project documentation — project-documenter (user-facing feature docs + sitemap), technical-documenter (developer/API docs), feature-documenter (feature inventory), update-code-map (navigable CodeMap.md with verified line numbers; spec bundled), and raginclude-generator (.raginclude files for RAG indexing).",
       "version": "0.1.0",
       "author": {
         "name": "Chameleon Labs LLC"
@@ -150,26 +150,6 @@
         "rag",
         "features",
         "api-docs"
-      ]
-    },
-    {
-      "name": "graphify",
-      "source": "./graphify",
-      "description": "Turn any folder of files \u2014 code, docs, papers, images \u2014 into a navigable knowledge graph with community detection: interactive HTML, GraphRAG-ready JSON, and a plain-language audit report.",
-      "version": "0.1.0",
-      "author": {
-        "name": "Chameleon Labs LLC"
-      },
-      "homepage": "https://github.com/Chameleon-Labs-LLC/plugins/tree/main/graphify",
-      "repository": "https://github.com/Chameleon-Labs-LLC/plugins",
-      "license": "MIT",
-      "category": "analysis",
-      "keywords": [
-        "knowledge-graph",
-        "graphrag",
-        "visualization",
-        "communities",
-        "analysis"
       ]
     },
     {

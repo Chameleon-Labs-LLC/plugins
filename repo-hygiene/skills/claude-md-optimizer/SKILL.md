@@ -45,7 +45,7 @@ Full rubric, keep/cut tables, and token math: `references/extraction-checklist.m
 ### 0. Back up and measure
 
 ```bash
-mkdir -p ~/backups/claude-md-opt-$(date +%Y%m%d-%H%M) && cp -a <targets> ~/backups/claude-md-opt-*/
+BK=~/backups/claude-md-opt-$(date +%Y%m%d-%H%M) && mkdir -p "$BK" && cp -a <targets> "$BK"/
 wc -c -w ~/.claude/CLAUDE.md ~/.config/agents/AGENTS.md ./CLAUDE.md ./AGENTS.md 2>/dev/null
 ```
 

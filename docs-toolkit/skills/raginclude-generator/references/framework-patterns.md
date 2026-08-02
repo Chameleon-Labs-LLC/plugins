@@ -10,7 +10,7 @@
 - [Go](#go)
 - [Monorepo](#monorepo)
 - [Claude Code Plugin](#claude-code-plugin)
-- [Example: Python Discord Bot](#chatmaster-python-discord-bot)
+- [Example: Python Discord Bot](#example-python-discord-bot)
 
 ---
 
@@ -258,14 +258,14 @@ requirements.txt
 - `config.yaml` — real API keys and tokens
 - `.env` — secrets
 - `AWS_*.md`, `*_Deployment_*.md`, `*_Deploy_*.md` — EC2 IPs, SSH keys, instance IDs
-- `ANTHROPIC_AUTH_GUIDE.md`, `OAUTH_IMPLEMENTATION.md` — auth internals
+- `*_AUTH_GUIDE.md`, `*_IMPLEMENTATION.md` — auth internals
 - `*Security_Audit*.md` — security findings
-- `CLAUDE.md` — contains EC2 instance ID, public IP, and SSH key paths; do NOT index
+- `CLAUDE.md` / `AGENTS.md` — agent instructions often reference infrastructure details (hosts, IPs, key paths); do NOT index
 - `Notes/**` — internal plans, compliance, bug bounty, roadmap; exclude by default
 - `Plans/**` — internal implementation plans
 - `Scripts/**/*.py`, `Scripts/**/*.sh` — internal ops scripts
 - `app/**/*.py` — implementation internals; no user-facing value
-- `bbs_app.sqlite3*`, `bbs_app.log*` — database and log files
+- `*.sqlite3*`, `*.log*` — database and log files
 - `backups/**` — backup files
 
 **Notes:**

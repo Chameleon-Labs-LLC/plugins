@@ -4,14 +4,19 @@
 # ensures youtube-transcript-api is installed, then runs the script.
 set -euo pipefail
 
-# Point this at your local clone of the yt-transcript project.
-# Override by exporting YT_TRANSCRIPT_PROJECT before invoking.
+# Local clone of the yt-transcript project (auto-cloned on first run).
+# Source: https://github.com/lelandg/yt-transcript
+# Override the location by exporting YT_TRANSCRIPT_PROJECT before invoking.
 PROJECT="${YT_TRANSCRIPT_PROJECT:-$HOME/code/yt-transcript}"
+YT_TRANSCRIPT_REPO="${YT_TRANSCRIPT_REPO:-https://github.com/lelandg/yt-transcript.git}"
 
 if [ ! -d "$PROJECT" ]; then
-    echo "ERROR: project not found at $PROJECT" >&2
-    echo "Set YT_TRANSCRIPT_PROJECT or edit this script to point at your clone." >&2
-    exit 1
+    echo ">>> yt-transcript project not found at $PROJECT — cloning $YT_TRANSCRIPT_REPO ..." >&2
+    if ! git clone --depth 1 "$YT_TRANSCRIPT_REPO" "$PROJECT"; then
+        echo "ERROR: could not clone $YT_TRANSCRIPT_REPO to $PROJECT" >&2
+        echo "Clone it manually, or set YT_TRANSCRIPT_PROJECT to an existing clone." >&2
+        exit 1
+    fi
 fi
 
 cd "$PROJECT"

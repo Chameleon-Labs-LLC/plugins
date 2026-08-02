@@ -69,7 +69,7 @@ Task tool call:
   subagent_type: "general-purpose"
   name: "dev-doc-{area-slug}"
   description: "Document {area name} technical details"
-  mode: "bypassPermissions"
+  mode: "acceptEdits"
   prompt: |
     You are documenting the technical details of {area name} for {project name}.
 

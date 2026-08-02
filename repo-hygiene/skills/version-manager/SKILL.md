@@ -1,6 +1,6 @@
 ---
 name: version-manager
-description: Use when bumping a version, cutting a release, or when a CHANGELOG is stale, missing versions, or disagrees with the code — and before opening any PR, per the versioning rule in AGENTS.md. Also on /version-manager [check|backfill|release], or when the user says "bump the version", "cut a release", "the changelog is old". Auto-detects version locations in any stack (pyproject, package.json, VERSION file, module constants, README display) — no per-repo config.
+description: Use when bumping a version, cutting a release, or when a CHANGELOG is stale, missing versions, or disagrees with the code — and before opening any PR. Also on /version-manager [check|backfill|release], or when the user says "bump the version", "cut a release", "the changelog is old". Auto-detects version locations in any stack (pyproject, package.json, VERSION file, module constants, README display) — no per-repo config.
 ---
 
 # Version Manager
@@ -11,10 +11,9 @@ history and the changelog, and cuts releases that update **every** location at
 once.
 
 - **Tool:** `${CLAUDE_PLUGIN_ROOT}/skills/version-manager/version_tool.py` (stdlib only, no install)
-- **Design:** `.claude_code/Docs/plans/2026-07-25-version-manager-design.md`
 - **Scope:** one repository at a time — there is deliberately no cross-repo sweep
-- **Enforced by:** the versioning rule in `~/.config/agents/AGENTS.md`, which every
-  CLI imports — so Codex, Copilot, Gemini and Pi are bound by it too
+- **Convention:** the version bump and changelog entry travel in the same commit,
+  before every PR or release
 
 ## Verbs
 
@@ -32,7 +31,7 @@ write nothing until you add `--apply`. Always show the user the dry run first.
 
 ## Standard workflow
 
-**Before opening a PR** (this is the house rule in `~/.config/agents/AGENTS.md`):
+**Before opening a PR:**
 
 ```bash
 T=${CLAUDE_PLUGIN_ROOT}/skills/version-manager/version_tool.py
@@ -82,8 +81,8 @@ An empty `{}` `package.json` is a stub and is skipped, not filled.
 - **Backfill never invents history.** Versions in the changelog with no locatable
   bump commit are reported and left untagged rather than tagged at a guess.
   Repos with a real bump record get nothing inserted between real releases.
-- **Placeholder detection:** a version set once and never moved (a busy web app'
-  `0.1.0`, a small web app, a personal site) is treated as a default, not a
+- **Placeholder detection:** a version set once and never moved (a project
+  stuck at `0.1.0` for its whole history, a small web app, a personal site) is treated as a default, not a
   record — the series is synthesized from PR/feature boundaries, never per commit.
   Above 60 boundaries they are grouped by calendar month so a busy repo does not
   land on something like `0.348.0`.

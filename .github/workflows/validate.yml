@@ -1,0 +1,51 @@
+name: validate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Marketplace and plugin structure
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+          errors = []
+          mp = json.load(open('.claude-plugin/marketplace.json'))
+          for entry in mp['plugins']:
+              name, src = entry['name'], entry['source']
+              if isinstance(src, str) and src.startswith('./'):
+                  root = src[2:]
+                  pj_path = os.path.join(root, '.claude-plugin', 'plugin.json')
+                  if not os.path.isfile(pj_path):
+                      errors.append(f"{name}: missing {pj_path}")
+                      continue
+                  pj = json.load(open(pj_path))
+                  if pj['name'] != name:
+                      errors.append(f"{name}: plugin.json name mismatch ({pj['name']})")
+                  if pj.get('version') != entry.get('version'):
+                      errors.append(f"{name}: version mismatch plugin.json={pj.get('version')} marketplace={entry.get('version')}")
+                  skills_dir = os.path.join(root, 'skills')
+                  if os.path.isdir(skills_dir):
+                      for sk in sorted(os.listdir(skills_dir)):
+                          if not os.path.isfile(os.path.join(skills_dir, sk, 'SKILL.md')):
+                              errors.append(f"{name}: skills/{sk} lacks SKILL.md")
+          for e in errors:
+              print('ERROR:', e)
+          print(f"checked {len(mp['plugins'])} marketplace entries")
+          sys.exit(1 if errors else 0)
+          EOF
+
+      - name: version-manager test suite
+        run: |
+          pip install pytest
+          python3 -m pytest repo-hygiene/skills/version-manager/tests/ -q
