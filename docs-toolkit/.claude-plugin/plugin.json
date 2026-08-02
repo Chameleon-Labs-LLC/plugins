@@ -1,0 +1,21 @@
+{
+  "name": "docs-toolkit",
+  "description": "Generate and maintain project documentation \u2014 project-documenter (user-facing feature docs + sitemap), technical-documenter (developer/API docs), feature-documenter (feature inventory), update-code-map (navigable CodeMap.md with verified line numbers; spec bundled), and raginclude-generator (.raginclude files for RAG indexing).",
+  "version": "0.1.0",
+  "author": {
+    "name": "Chameleon Labs LLC",
+    "email": "hello@chameleonlabs.ai"
+  },
+  "homepage": "https://github.com/Chameleon-Labs-LLC/plugins/tree/main/docs-toolkit",
+  "repository": "https://github.com/Chameleon-Labs-LLC/plugins",
+  "license": "MIT",
+  "keywords": [
+    "documentation",
+    "docs",
+    "codemap",
+    "sitemap",
+    "rag",
+    "features",
+    "api-docs"
+  ]
+}

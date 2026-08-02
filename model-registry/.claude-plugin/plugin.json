@@ -1,0 +1,22 @@
+{
+  "name": "model-registry",
+  "description": "Wire any project to a daily-refreshed public registry of current LLM model IDs (Claude, GPT, Gemini) so code stops hardcoding model names that go stale. Installs the zero-dependency Python/TypeScript client, migrates hardcoded IDs, and manages bundled fallbacks.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Chameleon Labs LLC",
+    "email": "hello@chameleonlabs.ai"
+  },
+  "homepage": "https://github.com/Chameleon-Labs-LLC/plugins/tree/main/model-registry",
+  "repository": "https://github.com/Chameleon-Labs-LLC/plugins",
+  "license": "MIT",
+  "keywords": [
+    "llm",
+    "models",
+    "model-ids",
+    "registry",
+    "anthropic",
+    "openai",
+    "gemini",
+    "fallback"
+  ]
+}

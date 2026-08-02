@@ -1,0 +1,22 @@
+{
+  "name": "repo-hygiene",
+  "description": "Keep any repo's agent-facing layer healthy \u2014 version-manager (standardized version bumps + changelogs, auto-detects where the version lives), repo-doctor (audit of AGENTS.md/CLAUDE.md topology, CodeMap freshness, token cost, doc drift), claude-md-optimizer (rightsize CLAUDE.md per Anthropic context-engineering guidance), and unify-agents-md (make AGENTS.md the single canonical guide every coding CLI follows).",
+  "version": "0.1.0",
+  "author": {
+    "name": "Chameleon Labs LLC",
+    "email": "hello@chameleonlabs.ai"
+  },
+  "homepage": "https://github.com/Chameleon-Labs-LLC/plugins/tree/main/repo-hygiene",
+  "repository": "https://github.com/Chameleon-Labs-LLC/plugins",
+  "license": "MIT",
+  "keywords": [
+    "versioning",
+    "changelog",
+    "release",
+    "agents-md",
+    "claude-md",
+    "audit",
+    "context-engineering",
+    "documentation"
+  ]
+}
