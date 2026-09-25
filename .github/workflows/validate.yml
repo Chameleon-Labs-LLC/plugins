@@ -56,7 +56,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: No CRLF in the index (bash cannot run CRLF scripts)
         run: |
-          bad="$(git ls-files --eol | awk '$1 == "i/crlf" {print $NF}')"
+          bad="$(git ls-files --eol | awk '$1 == "i/crlf" || $1 == "i/mixed" {print $NF}')"
           if [ -n "$bad" ]; then echo "CRLF files in the index:"; echo "$bad"; exit 1; fi
           echo "all tracked text files are LF"
 
@@ -107,7 +107,7 @@ jobs:
       - name: version-manager tests
         run: |
           python -m pip install pytest
-          python -m pytest repo-hygiene/skills/version-manager/tests/ -q
+          python -m pytest repo-hygiene/skills/version-manager/tests/ tests/ -q
       # Piped stdout is cp1252 on Windows; these used to crash on non-ASCII output.
       - name: repo-doctor and version_tool print through a pipe
         run: |

@@ -172,6 +172,11 @@ def _read(repo: Path, rel: Path) -> str | None:
         return None
 
 
+def _write(path: Path, text: str) -> None:
+    """Write UTF-8 with LF endings; write_text would emit CRLF on Windows."""
+    path.write_bytes(text.encode("utf-8"))
+
+
 def _extract(text: str, kind: str) -> str | None:
     m = PATTERNS[kind].search(text)
     return m.group("v") if m else None
@@ -242,8 +247,9 @@ def detect(repo: Path) -> tuple[Location | None, list[Location], list[str]]:
                              "is the repo version; bump plugins with "
                              "release --plugin NAME[=LEVEL]")
             elif len(plugins) != 1:
-                notes.append(f"{rel}: {len(plugins)} plugins — per-plugin "
-                             "versions, no single repo version; skipped")
+                why = ("metadata.version pattern mismatch" if meta and len(plugins) > 1
+                       else "per-plugin versions, no single repo version")
+                notes.append(f"{rel}: {len(plugins)} plugins — {why}; skipped")
                 continue
             else:
                 declared = str(plugins[0].get("version") or "") \
@@ -303,7 +309,7 @@ def write_version(repo: Path, loc: Location, new: str) -> None:
         raise GitError(f"no version pattern in {loc.path}")
     updated = pattern.sub(lambda m: m.group("pre") + new + m.group("post"),
                           text, count=1)
-    (repo / loc.path).write_text(updated, encoding="utf-8")
+    _write(repo / loc.path, updated)
 
 
 # --------------------------------------------------------------------------
@@ -443,7 +449,7 @@ def write_plugin_bump(repo: Path, rel: Path, b: PluginBump) -> None:
     if not m or m.group("v") != b.old:
         raise GitError(f"plugin {b.name}: version pattern mismatch in {rel}")
     entry = entry[:m.start("v")] + b.new + entry[m.end("v"):]
-    (repo / rel).write_text(text[:start] + entry + text[end:], encoding="utf-8")
+    _write(repo / rel, text[:start] + entry + text[end:])
     if b.plugin_json:
         write_version(repo, Location(b.plugin_json, "package_json", b.old), b.new)
 
@@ -725,7 +731,7 @@ def is_placeholder(git_entries: list[Entry], changelog_count: int = 0) -> bool:
     """A version set once and never moved is a default, not a record (§5.1).
 
     A changelog declaring several versions IS a record even when the version
-    file never moved — Heimdallr shipped 0.1.0 and 0.2.0 while app/__init__.py
+    file never moved — a small service shipped 0.1.0 and 0.2.0 while app/__init__.py
     sat at 0.1.0. Treating that as a placeholder would synthesize a series
     below what already shipped.
     """
@@ -806,7 +812,7 @@ def insert_section(repo: Path, version: str, when: str, body: str) -> None:
             updated = text[:m.start()] + section.lstrip("\n") + "\n" + text[m.start():]
         else:
             updated = text.rstrip() + "\n" + section
-    (repo / rel).write_text(updated, encoding="utf-8")
+    _write(repo / rel, updated)
 
 
 def fix_changelog_date(repo: Path, version: str, when: str) -> bool:
@@ -818,8 +824,7 @@ def fix_changelog_date(repo: Path, version: str, when: str) -> bool:
                          r"([-–—])\s*\d{4}-\d{2}-\d{2}", re.M)
     if not pattern.search(text):
         return False
-    (repo / rel).write_text(pattern.sub(lambda m: f"{m.group(1)} {m.group(3)} {when}", text),
-                            encoding="utf-8")
+    _write(repo / rel, pattern.sub(lambda m: f"{m.group(1)} {m.group(3)} {when}", text))
     return True
 
 
@@ -869,7 +874,7 @@ def cmd_check(repo: Path, **_: object) -> int:
     else:
         print(f"  classification: real record — {len(git_entries)} bumps in history")
 
-    # A shipped changelog ahead of the code is Heimdallr's exact failure.
+    # A shipped changelog ahead of the code is a small service's exact failure.
     if canonical and canonical.value and cl:
         highest = max(cl, key=version_key)
         if version_key(highest) > version_key(canonical.value):
@@ -932,7 +937,7 @@ def cmd_backfill(repo: Path, apply: bool = False, fix_dates: bool = False,
         if canonical is None:
             canonical = Location(Path("VERSION"), "version_file", None)
             if not (repo / "VERSION").exists() and apply:
-                (repo / "VERSION").write_text(head + "\n", encoding="utf-8")
+                _write(repo / "VERSION", head + "\n")
         elif apply:
             write_version(repo, canonical, head)
             for m in mirrors:
@@ -1063,7 +1068,7 @@ def cmd_release(repo: Path, level: str, apply: bool = False,
                 print(f"  note: plugin {name} has {n} commit(s) since its last "
                       f"version change — add --plugin {name}[=LEVEL] to bump it")
 
-    body =Path(notes).read_text(encoding="utf-8") if notes else draft_entries(subjects)
+    body = Path(notes).read_text(encoding="utf-8") if notes else draft_entries(subjects)
     print("\nCHANGELOG DRAFT" + ("" if notes else " (curate with --notes FILE)"))
     print("\n".join("  " + ln for ln in body.rstrip().splitlines()))
 
@@ -1073,7 +1078,8 @@ def cmd_release(repo: Path, level: str, apply: bool = False,
         print(f"  - set {t.label} = {new}")
     for b in plugin_bumps:
         print(f"  - set {b.label} = {b.new}")
-    print(f"  - insert changelog [{new}] - {date.today()}")
+    heading = _section_heading(_read(repo, changelog_path(repo)) or "", new, str(date.today()))
+    print(f"  - insert changelog {heading.lstrip('# ')}")
     print(f"  - commit and tag {tag}")
 
     if not apply:

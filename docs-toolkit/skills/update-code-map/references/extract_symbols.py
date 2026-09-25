@@ -138,7 +138,7 @@ def extract_regex(ext: str, source: str) -> list[dict]:
 
 
 def excluded(rel: str, patterns: list[str]) -> bool:
-    parts = re.split(r"[\/]", rel)  # --only-changed paths may use / on Windows
+    parts = re.split(r"[\\/]", rel)  # os.walk gives \ on Windows; --only-changed may give /
     return any(fnmatch.fnmatch(part, pat) for part in parts for pat in patterns)
 
 

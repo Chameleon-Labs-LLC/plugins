@@ -86,16 +86,17 @@ with_timeout() {
   "$@" & pid=$!
   ( sleep "$secs"
     if kill -0 "$pid" 2>/dev/null; then
-      : >"$marker"; pkill -TERM -P "$pid" 2>/dev/null; kill -TERM "$pid" 2>/dev/null
-    fi ) &
+      : >"$marker"; pkill -TERM -P "$pid"; kill -TERM "$pid"
+    fi ) 2>/dev/null &   # also hides the "Terminated" notice for its sleep
   watcher=$!
   # A background job ignores SIGINT, so Ctrl-C must be forwarded by hand.
-  trap 'pkill -TERM -P "$pid" 2>/dev/null; kill -TERM "$pid" 2>/dev/null
-        pkill -P "$watcher" 2>/dev/null; kill "$watcher" 2>/dev/null
-        rm -f "$marker"; exit 130' INT TERM
+  local cleanup='pkill -TERM -P "$pid" 2>/dev/null; kill -TERM "$pid" 2>/dev/null
+        pkill -P "$watcher" 2>/dev/null; kill "$watcher" 2>/dev/null; rm -f "$marker"'
+  trap "$cleanup; exit 130" INT
+  trap "$cleanup; exit 143" TERM
   wait "$pid"; rc=$?
   trap - INT TERM
-  pkill -P "$watcher" 2>/dev/null; kill "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
+  { pkill -P "$watcher"; kill "$watcher"; wait "$watcher"; } 2>/dev/null
   if [ -e "$marker" ]; then rm -f "$marker"; return 124; fi
   return "$rc"
 }
