@@ -1,7 +1,7 @@
 {
   "name": "scan-source",
   "description": "Layered local security scan for downloaded/cloned source — malware/supply-chain (GuardDog), known CVEs + leaked secrets (Trivy, OSV-Scanner, pip-audit), and insecure-code SAST (Semgrep). Interprets results and recommends concrete fixes.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Chameleon Labs LLC",
     "email": "hello@chameleonlabs.ai"

@@ -1,0 +1,8 @@
+# Force LF for every text file. A Windows clone with core.autocrlf=true
+# otherwise checks out shell scripts with CRLF, and bash cannot run them.
+* text=auto eol=lf
+*.sh text eol=lf
+scan-source/skills/scan-source/scripts/scan-download text eol=lf
+*.png binary
+*.jpg binary
+*.gif binary

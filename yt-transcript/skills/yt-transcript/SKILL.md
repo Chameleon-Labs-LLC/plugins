@@ -9,7 +9,8 @@ Downloads a YouTube transcript via the `yt_transcript.py` script in a local `yt-
 
 ## Prerequisites
 
-This skill drives the [lelandg/yt-transcript](https://github.com/lelandg/yt-transcript) project (`yt_transcript.py` + `requirements.txt`). On first run, `scripts/run.sh` clones it automatically to `~/code/yt-transcript` if it isn't there. To use an existing clone instead, set the `YT_TRANSCRIPT_PROJECT` env var to its path (and `YT_TRANSCRIPT_REPO` to override the clone URL). Requires `git` and `python3`.
+This skill drives the [lelandg/yt-transcript](https://github.com/lelandg/yt-transcript) project (`yt_transcript.py` + `requirements.txt`). On first run, `scripts/run.sh` clones it automatically to `~/code/yt-transcript` if it isn't there. To use an existing clone instead, set the `YT_TRANSCRIPT_PROJECT` env var to its path (and `YT_TRANSCRIPT_REPO` to override the clone URL). Requires `git`, Python 3.8+, and bash. It runs on Linux, WSL, and macOS, and
+on native Windows through Git Bash (the Bash tool Claude Code uses there).
 
 ## When to use
 
@@ -20,15 +21,17 @@ Trigger whenever the user supplies a YouTube URL or a bare 11-character video ID
 Use the bundled Bash wrapper at `scripts/run.sh`. It handles the full venv lifecycle so we don't depend on whatever Python happens to be on PATH or a stale global pip install:
 
 1. cd into the yt-transcript project
-2. Pick a venv: prefer `.venv_linux`, fall back to `.venv`, create `.venv_linux` if neither exists
-3. Activate it
-4. Install `requirements.txt` if `youtube_transcript_api` isn't importable
-5. Run `yt_transcript.py` with whatever args we pass
+2. Pick a venv whose interpreter exists on this platform, or create the first one:
+   Linux/WSL `.venv_linux` > `.venv`; macOS `.venv` > `.venv_linux`; Windows
+   `.venv` > `.venv_windows` (`Scripts/python.exe`). WSL and Windows can share one
+   clone without clobbering each other's venv.
+3. Install `requirements.txt` if `youtube_transcript_api` isn't importable
+4. Run `yt_transcript.py` with the venv's Python and whatever args we pass
 
 **Invoke it via the Bash tool:**
 
 ```bash
-bash ${CLAUDE_PLUGIN_ROOT}/skills/yt-transcript/scripts/run.sh "<URL_OR_ID>"
+bash "${CLAUDE_PLUGIN_ROOT}/skills/yt-transcript/scripts/run.sh" "<URL_OR_ID>"
 ```
 
 The script is cwd'd into the project, so the `yt_transcript.py` default output of `./Notes` lands in the right place automatically. Pass `-d <path>` to override.
@@ -46,7 +49,7 @@ The wrapper always passes `-r` so output is reformatted into readable prose. It 
 
 Paragraph length stays at the script default (`-p 4`, ~3–4 sentences per paragraph). Any user-supplied flag overrides these defaults via argparse last-wins, so passing `-m light` or `-p 6` works as expected.
 
-If the user wants the raw, unformatted transcript, they need to bypass the wrapper (call `python yt_transcript.py` directly inside the venv) — there is no "no-reformat" flag.
+If the user wants the raw, unformatted transcript, they need to bypass the wrapper (run `yt_transcript.py` directly with the venv's Python) — there is no "no-reformat" flag.
 
 ## Useful flags
 
@@ -64,7 +67,7 @@ Pass these through when the user asks for the corresponding behavior — don't a
 Example with flags:
 
 ```bash
-bash ${CLAUDE_PLUGIN_ROOT}/skills/yt-transcript/scripts/run.sh "<URL>" -t -p 3
+bash "${CLAUDE_PLUGIN_ROOT}/skills/yt-transcript/scripts/run.sh" "<URL>" -t -p 3
 ```
 
 ## After running
@@ -73,7 +76,7 @@ Report the saved file path (the script logs `INFO: Saved to: ...` on the last st
 
 ## Failure modes
 
-- **IP-blocked by YouTube** — surface the error verbatim; don't retry. If the venv has a newer `youtube-transcript-api` that got blocked, suggest pinning to an older version inside the venv (`source .venv_linux/bin/activate && pip install 'youtube-transcript-api<1.0'`) or running from a different IP where an older version already works.
+- **IP-blocked by YouTube** — surface the error verbatim; don't retry. If the venv has a newer `youtube-transcript-api` that got blocked, suggest pinning to an older version inside the venv (`.venv_linux/bin/python -m pip install 'youtube-transcript-api<1.0'`; on Windows `.venv/Scripts/python.exe -m pip ...`) or running from a different IP where an older version already works.
 - **Transcripts disabled on the video** — script exits non-zero with a clear error; surface it and stop.
 - **Bare ID not 11 chars** — ask the user to confirm the URL or ID rather than guessing.
-- **`-r -m full` missing deps** — tell the user to `pip install "deepmultilingualpunctuation>=1.0" "transformers<5" nltk` *inside the activated venv*, or drop back to `-m light`.
+- **`-r -m full` missing deps** — tell the user to run `<venv python> -m pip install "deepmultilingualpunctuation>=1.0" "transformers<5" nltk` with the venv's interpreter, or drop back to `-m light`.
