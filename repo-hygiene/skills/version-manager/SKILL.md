@@ -17,7 +17,10 @@ once.
 
 ## Verbs
 
-Run with `python3 ${CLAUDE_PLUGIN_ROOT}/skills/version-manager/version_tool.py --repo <ABS_PATH> <verb>`.
+Run with `"$PY" "${CLAUDE_PLUGIN_ROOT}/skills/version-manager/version_tool.py" --repo <ABS_PATH> <verb>`,
+where `PY=python3; "$PY" -c '' 2>/dev/null || PY=python` runs first in the same
+Bash call. That line picks `python3` on Linux/macOS and falls back to `python` on
+native Windows, where `python3` is often missing or the Microsoft Store stub.
 `--repo` defaults to the current directory; always pass an absolute path.
 
 | Verb | Writes? | Use it for |
@@ -34,9 +37,10 @@ write nothing until you add `--apply`. Always show the user the dry run first.
 **Before opening a PR:**
 
 ```bash
-T=${CLAUDE_PLUGIN_ROOT}/skills/version-manager/version_tool.py
-python3 $T --repo /abs/path/to/repo release minor            # dry run: read the draft
-python3 $T --repo /abs/path/to/repo release minor --notes /tmp/notes.md --apply
+PY=python3; "$PY" -c '' 2>/dev/null || PY=python
+T="${CLAUDE_PLUGIN_ROOT}/skills/version-manager/version_tool.py"
+"$PY" "$T" --repo /abs/path/to/repo release minor            # dry run: read the draft
+"$PY" "$T" --repo /abs/path/to/repo release minor --notes <scratchpad>/notes.md --apply
 ```
 
 Pick the level from what actually shipped — `major` for a breaking change,
@@ -44,16 +48,19 @@ Pick the level from what actually shipped — `major` for a breaking change,
 the commits suggest; it never picks silently.
 
 **Curate the changelog body.** The generated draft is raw commit subjects. Rewrite
-it into prose in a file and pass `--notes FILE`. This is the deliberate manual
+it into prose in a file and pass `--notes FILE`. On native Windows give `FILE`
+as a Windows path (`C:/...`), not `/tmp/...`: a file written with the Write tool
+at `/tmp/...` lands in `<drive>:\tmp`, while Git Bash maps the same `/tmp`
+argument to its own temp dir, so the tool would read a different file. This is the deliberate manual
 step — generated draft, curated release.
 
 **Adopting the tool in a repo for the first time:**
 
 ```bash
-python3 $T --repo /abs/path check                    # see what is wrong
-python3 $T --repo /abs/path backfill                 # dry run
-python3 $T --repo /abs/path backfill --apply         # tags + changelog gaps
-python3 $T --repo /abs/path backfill --apply --fix-dates   # only if dates are wrong
+"$PY" "$T" --repo /abs/path check                    # see what is wrong
+"$PY" "$T" --repo /abs/path backfill                 # dry run
+"$PY" "$T" --repo /abs/path backfill --apply         # tags + changelog gaps
+"$PY" "$T" --repo /abs/path backfill --apply --fix-dates   # only if dates are wrong
 ```
 
 ## What it detects (no manifest)
@@ -72,6 +79,27 @@ release.
 
 `README.md`'s `**Version X.Y.Z**` display is always a mirror, never canonical.
 An empty `{}` `package.json` is a stub and is skipped, not filled.
+
+**Claude Code plugin marketplaces** (`.claude-plugin/marketplace.json`):
+
+- **One plugin:** that plugin entry's `version` is canonical. `metadata.version`
+  is the catalog's own series and is left alone.
+- **Several plugins with `metadata.version`:** `metadata.version` is canonical.
+  It drives the changelog and the `v*` tag. Each plugin keeps its own version.
+  Bump plugins in the same release with repeatable `--plugin NAME[=LEVEL]`
+  (LEVEL defaults to the release level). The flag updates the marketplace entry
+  and `<plugin>/.claude-plugin/plugin.json` together. It refuses when the two
+  disagree, when a plugin has an external source, or when a name is unknown.
+  The dry run lists each plugin that has commits since its `plugin.json` last
+  changed but is not named:
+
+  ```bash
+  "$PY" "$T" --repo /abs/path release minor \
+      --plugin scan-source --plugin docs-toolkit=patch --notes <scratchpad>/notes.md
+  ```
+
+The changelog keeps its existing heading style: Keep a Changelog
+`## [1.2.0] - date`, or unbracketed `## 1.2.0 — date`.
 
 ## Gotchas
 
@@ -94,8 +122,8 @@ An empty `{}` `package.json` is a stub and is skipped, not filled.
 ## Tests
 
 ```bash
-source /path/to/your/venv/bin/activate
-python3 -m pytest ${CLAUDE_PLUGIN_ROOT}/skills/version-manager/tests/ -q
+PY=python3; "$PY" -c '' 2>/dev/null || PY=python   # any Python with pytest installed
+"$PY" -m pytest "${CLAUDE_PLUGIN_ROOT}/skills/version-manager/tests/" -q
 ```
 
 Each fixture reproduces a defect that is actually present in one of the user's

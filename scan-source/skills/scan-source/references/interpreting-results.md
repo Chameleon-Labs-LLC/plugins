@@ -117,6 +117,9 @@ never calls.
 ## 7. Recommended fixes per ecosystem
 
 Give concrete commands. Re-run the scan after fixing to confirm counts drop.
+These same commands become the steps of the generated fix script (SKILL.md
+step 8): fixable actual vulns → runnable steps; unfixable actual vulns → error
+steps, never invented commands.
 
 ### npm / pnpm / yarn
 - Direct dep bump: `npm update <pkg>` (or `pnpm up <pkg>`, `yarn up <pkg>`).
