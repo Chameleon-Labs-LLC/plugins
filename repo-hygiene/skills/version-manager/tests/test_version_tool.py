@@ -443,7 +443,7 @@ def test_sparse_real_record_invents_nothing(tmp_path):
 
 
 def test_placeholder_version_is_classified_and_synthesized(tmp_path):
-    """ChameleonLabs: 0.1.0 set once and never moved is a default, not a record."""
+    """A busy web app: 0.1.0 set once and never moved is a default, not a record."""
     repo = new_repo(tmp_path)
     commit(repo, "init", {"package.json": json.dumps({"version": "0.1.0"})},
            when="2025-11-10T10:00:00")
@@ -473,7 +473,7 @@ def test_synthesis_is_per_boundary_never_per_commit(tmp_path):
 
 
 def test_boundary_guard_groups_by_month(tmp_path):
-    """ChameleonLabs' 348 PRs must not become 0.348.0."""
+    """A busy web app' 348 PRs must not become 0.348.0."""
     repo = new_repo(tmp_path)
     commit(repo, "init", {"VERSION": "0.1.0\n"}, when="2025-11-10T10:00:00")
     n = vt.BOUNDARY_GUARD + 20
@@ -488,7 +488,7 @@ def test_boundary_guard_groups_by_month(tmp_path):
 
 
 def test_changelog_record_is_not_a_placeholder(tmp_path):
-    """Heimdallr: app/__init__.py never moved off 0.1.0, but the changelog
+    """A small service: app/__init__.py never moved off 0.1.0, but the changelog
     shipped 0.1.0 and 0.2.0. Synthesizing here produced 0.0.1 — below what
     already shipped."""
     repo = new_repo(tmp_path)
@@ -699,7 +699,7 @@ def test_check_never_writes(tmp_path):
 
 
 def test_version_behind_changelog_is_reported(tmp_path, capsys):
-    """Heimdallr: code says 0.1.0, changelog shipped 0.2.0."""
+    """A small service: code says 0.1.0, changelog shipped 0.2.0."""
     repo = new_repo(tmp_path)
     commit(repo, "init", {
         "app/__init__.py": '__version__ = "0.1.0"\n',

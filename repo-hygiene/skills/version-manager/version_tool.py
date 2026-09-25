@@ -725,7 +725,7 @@ def is_placeholder(git_entries: list[Entry], changelog_count: int = 0) -> bool:
     """A version set once and never moved is a default, not a record (§5.1).
 
     A changelog declaring several versions IS a record even when the version
-    file never moved — Heimdallr shipped 0.1.0 and 0.2.0 while app/__init__.py
+    file never moved — a small service shipped 0.1.0 and 0.2.0 while app/__init__.py
     sat at 0.1.0. Treating that as a placeholder would synthesize a series
     below what already shipped.
     """
@@ -869,7 +869,7 @@ def cmd_check(repo: Path, **_: object) -> int:
     else:
         print(f"  classification: real record — {len(git_entries)} bumps in history")
 
-    # A shipped changelog ahead of the code is Heimdallr's exact failure.
+    # A shipped changelog ahead of the code is a small service's exact failure.
     if canonical and canonical.value and cl:
         highest = max(cl, key=version_key)
         if version_key(highest) > version_key(canonical.value):
@@ -1063,7 +1063,7 @@ def cmd_release(repo: Path, level: str, apply: bool = False,
                 print(f"  note: plugin {name} has {n} commit(s) since its last "
                       f"version change — add --plugin {name}[=LEVEL] to bump it")
 
-    body =Path(notes).read_text(encoding="utf-8") if notes else draft_entries(subjects)
+    body = Path(notes).read_text(encoding="utf-8") if notes else draft_entries(subjects)
     print("\nCHANGELOG DRAFT" + ("" if notes else " (curate with --notes FILE)"))
     print("\n".join("  " + ln for ln in body.rstrip().splitlines()))
 
