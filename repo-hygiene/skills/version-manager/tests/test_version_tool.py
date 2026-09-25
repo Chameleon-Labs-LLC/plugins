@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -96,6 +97,217 @@ def test_empty_package_json_is_skipped_not_filled(tmp_path):
     assert canonical.path == Path("VERSION")
     assert canonical.value == "0.2.0"
     assert any("empty stub" in n for n in notes)
+
+
+MARKETPLACE = """{
+  "name": "example-marketplace",
+  "owner": { "name": "Example" },
+  "metadata": {
+    "description": "catalog of plugins",
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "example-plugin",
+      "source": "./",
+      "skills": ["./claude/skills/version-manager"],
+      "description": "one plugin",
+      "version": "0.3.0"
+    }
+  ]
+}
+"""
+
+
+def test_marketplace_plugin_version_is_detected(tmp_path):
+    """.claude_code: the only version home is the plugin entry in
+    .claude-plugin/marketplace.json — metadata.version is the catalog's own
+    series and must not be picked (or later overwritten) as the repo version."""
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {".claude-plugin/marketplace.json": MARKETPLACE})
+    canonical, mirrors, notes = vt.detect(repo)
+    assert canonical is not None
+    assert canonical.path == Path(".claude-plugin/marketplace.json")
+    assert canonical.kind == "marketplace"
+    assert canonical.value == "0.3.0"
+    assert not mirrors
+    assert any("metadata.version" in n for n in notes)
+
+
+def test_marketplace_with_many_plugins_and_no_catalog_version_is_noted(tmp_path):
+    """Several plugins, each with its own version, and no metadata.version —
+    no single repo version exists, so the tool must not pick plugins[0]."""
+    repo = new_repo(tmp_path)
+    market = json.loads(MARKETPLACE)
+    del market["metadata"]["version"]
+    market["plugins"].append(dict(market["plugins"][0],
+                                  name="second-plugin", version="1.4.0"))
+    commit(repo, "init",
+           {".claude-plugin/marketplace.json": json.dumps(market, indent=2)})
+    canonical, _mirrors, notes = vt.detect(repo)
+    assert canonical is None
+    assert any("2 plugins" in n for n in notes)
+
+
+# Chameleon-Labs-LLC/plugins shape: many bundled plugins, a catalog series in
+# metadata.version, and a changelog with unbracketed "## 0.3.0 — date" headings.
+MULTI_CHANGELOG = """# Changelog
+
+Marketplace releases, newest first.
+
+## 0.3.0 — 2026-08-02
+
+- three plugins
+"""
+
+
+def _multi_market(meta: str | None = "0.3.0") -> str:
+    market = json.loads(MARKETPLACE)
+    if meta is None:
+        del market["metadata"]["version"]
+    else:
+        market["metadata"]["version"] = meta
+    market["plugins"] = [
+        {"name": "alpha", "source": "./alpha", "description": "a",
+         "author": {"name": "Ex"}, "version": "0.1.0"},
+        {"name": "beta", "source": "./beta", "description": "b",
+         "version": "1.4.0"},
+        {"name": "remote", "source": {"source": "github", "repo": "x/y"},
+         "description": "r", "version": "2.0.0"},
+    ]
+    return json.dumps(market, indent=2) + "\n"
+
+
+def _plugin_json(name: str, version: str) -> str:
+    return json.dumps({"name": name, "version": version,
+                       "description": "d"}, indent=2) + "\n"
+
+
+def _multi_repo(tmp_path: Path, meta: str | None = "0.3.0",
+                beta_json: str = "1.4.0") -> Path:
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {
+        ".claude-plugin/marketplace.json": _multi_market(meta),
+        "alpha/.claude-plugin/plugin.json": _plugin_json("alpha", "0.1.0"),
+        "beta/.claude-plugin/plugin.json": _plugin_json("beta", beta_json),
+        "CHANGELOG.md": MULTI_CHANGELOG,
+    }, when="2026-08-02T10:00:00")
+    commit(repo, "feat(alpha): new skill", {"alpha/skill.md": "x\n"},
+           when="2026-09-01T10:00:00")
+    return repo
+
+
+def _versions(repo: Path) -> dict[str, str]:
+    data = json.loads((repo / ".claude-plugin/marketplace.json").read_text())
+    out = {"metadata": data["metadata"]["version"]}
+    out.update({p["name"]: p["version"] for p in data["plugins"]})
+    for name in ("alpha", "beta"):
+        pj = json.loads((repo / name / ".claude-plugin/plugin.json").read_text())
+        out[f"{name}/plugin.json"] = pj["version"]
+    return out
+
+
+def test_multi_plugin_marketplace_tracks_the_catalog_series(tmp_path):
+    repo = _multi_repo(tmp_path)
+    canonical, mirrors, notes = vt.detect(repo)
+    assert canonical is not None
+    assert canonical.kind == "marketplace_meta"
+    assert canonical.value == "0.3.0"
+    assert not mirrors
+    assert any("--plugin" in n for n in notes)
+
+
+def test_unbracketed_changelog_headings_are_parsed(tmp_path):
+    repo = _multi_repo(tmp_path)
+    assert vt.changelog_ledger(repo) == {"0.3.0": "2026-08-02"}
+
+
+def test_release_bumps_named_plugins_and_the_catalog(tmp_path):
+    repo = _multi_repo(tmp_path)
+    before = (repo / ".claude-plugin/marketplace.json").read_text()
+
+    assert vt.main(["--repo", str(repo), "release", "minor",
+                    "--plugin", "alpha", "--plugin", "beta=patch", "--apply"]) == 0
+
+    assert _versions(repo) == {
+        "metadata": "0.4.0",
+        "alpha": "0.2.0", "alpha/plugin.json": "0.2.0",
+        "beta": "1.4.1", "beta/plugin.json": "1.4.1",
+        "remote": "2.0.0",
+    }
+    after = (repo / ".claude-plugin/marketplace.json").read_text()
+    assert after.count("\n") == before.count("\n"), "file was reserialised"
+    assert '"author": {\n        "name": "Ex"\n      }' in after
+    changelog = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert f"## 0.4.0 — {date.today()}" in changelog, "heading style not kept"
+    assert "## [0.4.0]" not in changelog
+    assert changelog.index("## 0.4.0") < changelog.index("## 0.3.0")
+    assert "v0.4.0" in vt.existing_tags(repo)
+    assert not vt.is_dirty(repo)
+
+
+def test_release_plugin_refuses_when_plugin_json_disagrees(tmp_path, capsys):
+    repo = _multi_repo(tmp_path, beta_json="1.3.0")
+    before = _versions(repo)
+    assert vt.main(["--repo", str(repo), "release", "minor",
+                    "--plugin", "beta", "--apply"]) == 1
+    assert "beta" in capsys.readouterr().out
+    assert _versions(repo) == before
+
+
+def test_release_plugin_refuses_unknown_external_or_bad_level(tmp_path):
+    repo = _multi_repo(tmp_path)
+    before = _versions(repo)
+    for spec in ("gamma", "remote", "alpha=huge", "alpha,beta"):
+        assert vt.main(["--repo", str(repo), "release", "minor",
+                        "--plugin", spec, "--apply"]) == 1, spec
+    assert vt.main(["--repo", str(repo), "release", "minor",
+                    "--plugin", "alpha", "--plugin", "alpha", "--apply"]) == 1
+    assert _versions(repo) == before
+    assert "v0.4.0" not in vt.existing_tags(repo)
+
+
+def test_release_plugin_flag_needs_a_multi_plugin_marketplace(tmp_path):
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {"VERSION": "1.0.0\n"})
+    assert vt.main(["--repo", str(repo), "release", "patch",
+                    "--plugin", "alpha", "--apply"]) == 1
+    assert (repo / "VERSION").read_text() == "1.0.0\n"
+
+
+def test_release_names_changed_plugins_left_unbumped(tmp_path, capsys):
+    repo = _multi_repo(tmp_path)
+    assert vt.main(["--repo", str(repo), "release", "minor"]) == 0
+    out = capsys.readouterr().out
+    assert "alpha" in out and "--plugin alpha" in out
+    assert "--plugin beta" not in out, "beta has no commits of its own"
+
+
+def test_check_lists_plugin_versions_and_flags_drift(tmp_path, capsys):
+    repo = _multi_repo(tmp_path, beta_json="1.3.0")
+    assert vt.main(["--repo", str(repo), "check"]) == 0
+    out = capsys.readouterr().out
+    assert "plugin: alpha = 0.1.0" in out
+    assert "plugin: beta = 1.4.0" in out and "DISAGREES" in out
+
+
+def test_release_bumps_marketplace_plugin_not_metadata(tmp_path):
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {
+        ".claude-plugin/marketplace.json": MARKETPLACE,
+        "CHANGELOG.md": CHANGELOG.format(v="0.3.0", d="2026-08-01"),
+    }, when="2026-08-01T10:00:00")
+    commit(repo, "feat: new skill", when="2026-08-06T10:00:00")
+
+    assert vt.main(["--repo", str(repo), "release", "minor", "--apply"]) == 0
+
+    text = (repo / ".claude-plugin/marketplace.json").read_text()
+    data = json.loads(text)
+    assert data["plugins"][0]["version"] == "0.4.0"
+    assert data["metadata"]["version"] == "0.2.0", "metadata.version overwritten"
+    assert '"description": "catalog of plugins"' in text, "file was reserialised"
+    assert "## [0.4.0]" in (repo / "CHANGELOG.md").read_text()
+    assert "v0.4.0" in vt.existing_tags(repo)
 
 
 def test_version_file_with_trailing_comments_is_detected(tmp_path):
@@ -231,7 +443,7 @@ def test_sparse_real_record_invents_nothing(tmp_path):
 
 
 def test_placeholder_version_is_classified_and_synthesized(tmp_path):
-    """A busy web app: 0.1.0 set once and never moved is a default, not a record."""
+    """ChameleonLabs: 0.1.0 set once and never moved is a default, not a record."""
     repo = new_repo(tmp_path)
     commit(repo, "init", {"package.json": json.dumps({"version": "0.1.0"})},
            when="2025-11-10T10:00:00")
@@ -261,7 +473,7 @@ def test_synthesis_is_per_boundary_never_per_commit(tmp_path):
 
 
 def test_boundary_guard_groups_by_month(tmp_path):
-    """A busy web app' 348 PRs must not become 0.348.0."""
+    """ChameleonLabs' 348 PRs must not become 0.348.0."""
     repo = new_repo(tmp_path)
     commit(repo, "init", {"VERSION": "0.1.0\n"}, when="2025-11-10T10:00:00")
     n = vt.BOUNDARY_GUARD + 20
@@ -276,7 +488,7 @@ def test_boundary_guard_groups_by_month(tmp_path):
 
 
 def test_changelog_record_is_not_a_placeholder(tmp_path):
-    """A small service: app/__init__.py never moved off 0.1.0, but the changelog
+    """Heimdallr: app/__init__.py never moved off 0.1.0, but the changelog
     shipped 0.1.0 and 0.2.0. Synthesizing here produced 0.0.1 — below what
     already shipped."""
     repo = new_repo(tmp_path)
@@ -487,7 +699,7 @@ def test_check_never_writes(tmp_path):
 
 
 def test_version_behind_changelog_is_reported(tmp_path, capsys):
-    """A small service: code says 0.1.0, changelog shipped 0.2.0."""
+    """Heimdallr: code says 0.1.0, changelog shipped 0.2.0."""
     repo = new_repo(tmp_path)
     commit(repo, "init", {
         "app/__init__.py": '__version__ = "0.1.0"\n',
