@@ -85,3 +85,10 @@ scripts used by the new transcript tests. Explicit LF assertions reproduced
 all nine affected cases locally. The fixture now writes UTF-8 bytes, matching
 the existing executable-fixture helper; the production runner is unchanged.
 The assertions remain to catch this independently of a shell's CRLF tolerance.
+
+The LF correction alone did not resolve the hosted Windows failure. The
+remaining failures were limited to fixture creation across Git Bash/native
+Python. Fixture settings now travel in a JSON file instead of environment
+values containing relative paths and shell source, avoiding MSYS automatic
+path conversion. Tests verify both the generated interpreter's location and
+its exact bytes before asserting the runner result.

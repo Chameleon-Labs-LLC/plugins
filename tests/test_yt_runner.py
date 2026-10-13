@@ -26,10 +26,11 @@ if args[0] == "-c":
     else:
         sys.exit(1)
 elif args[:2] == ["-m", "venv"]:
-    target = pathlib.Path(args[2]) / os.environ["VENV_PY"]
+    settings = json.loads(pathlib.Path(os.environ["PROBE_CONFIG"]).read_text(encoding="utf-8"))
+    target = pathlib.Path(args[2]) / settings["venv_py"]
     target.parent.mkdir(parents=True)
     # These are shell scripts even when the probe runs under native Windows.
-    target.write_bytes(os.environ["SHIM"].encode("utf-8"))
+    target.write_bytes(settings["shim"].encode("utf-8"))
     target.chmod(0o755)
 elif args[0] == "yt_transcript.py":
     print("RUN", minor, json.dumps(args[1:]))
@@ -85,12 +86,22 @@ def test_runner_requires_supported_working_python(tmp_path, platform, case):
     bin_path = bins.as_posix()
     if os.name == "nt":
         bin_path = "/" + bin_path[0].lower() + bin_path[2:]
+    # MSYS can rewrite path-like environment values when calling native Python.
+    # Keep relative paths and shell source in a file; only its real path crosses
+    # the shell/native boundary.
+    config = tmp_path / "probe-config.json"
+    config.write_text(json.dumps({"venv_py": venv_py, "shim": shim(10)}), encoding="utf-8")
     env = dict(os.environ, PROBE_BIN=bin_path, YT_TRANSCRIPT_PROJECT=str(project),
-               EVENTS=str(events), VENV_PY=venv_py, SHIM=shim(10))
+               EVENTS=str(events), PROBE_CONFIG=str(config))
     result = subprocess.run([BASH, "-c", 'export PATH="$PROBE_BIN"; source "$@"', "test",
                              str(ROOT / "yt-transcript/skills/yt-transcript/scripts/run.sh"),
                              "dQw4w9WgXcQ", "-t"], env=env, capture_output=True, text=True)
     calls = [json.loads(line) for line in events.read_text().splitlines()] if events.exists() else []
+    if any(args[:2] == ["-m", "venv"] for _, args in calls):
+        created = next(args[2] for _, args in calls if args[:2] == ["-m", "venv"])
+        generated = project / created / venv_py
+        assert generated.is_file(), result.stdout + result.stderr
+        assert generated.read_bytes() == shim(10).encode("utf-8")
     if case in ("old_boot", "blocked_venvs"):
         assert result.returncode == 1, result.stdout + result.stderr
         assert "Python 3.10+" in result.stderr
