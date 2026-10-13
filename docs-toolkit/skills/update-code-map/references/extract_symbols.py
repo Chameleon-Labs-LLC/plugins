@@ -138,11 +138,22 @@ def extract_regex(ext: str, source: str) -> list[dict]:
 
 
 def excluded(rel: str, patterns: list[str]) -> bool:
-    parts = rel.split(os.sep)
+    parts = re.split(r"[\\/]", rel)  # os.walk gives \ on Windows; --only-changed may give /
     return any(fnmatch.fnmatch(part, pat) for part in parts for pat in patterns)
 
 
+def _utf8_stdio():
+    # Windows pipes/consoles default to cp1252, which cannot encode the
+    # non-ASCII paths in the summary (UnicodeEncodeError). Force UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main() -> int:
+    _utf8_stdio()
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", default=".")
     ap.add_argument("--out", default="inventory.json")
