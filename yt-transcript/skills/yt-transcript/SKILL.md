@@ -9,7 +9,7 @@ Downloads a YouTube transcript via the `yt_transcript.py` script in a local `yt-
 
 ## Prerequisites
 
-This skill drives the [lelandg/yt-transcript](https://github.com/lelandg/yt-transcript) project (`yt_transcript.py` + `requirements.txt`). On first run, `scripts/run.sh` clones it automatically to `~/code/yt-transcript` if it isn't there. To use an existing clone instead, set the `YT_TRANSCRIPT_PROJECT` env var to its path (and `YT_TRANSCRIPT_REPO` to override the clone URL). Requires `git`, Python 3.8+, and bash. It runs on Linux, WSL, and macOS, and
+This skill drives the [lelandg/yt-transcript](https://github.com/lelandg/yt-transcript) project (`yt_transcript.py` + `requirements.txt`). On first run, `scripts/run.sh` clones it automatically to `~/code/yt-transcript` if it isn't there. To use an existing clone instead, set the `YT_TRANSCRIPT_PROJECT` env var to its path (and `YT_TRANSCRIPT_REPO` to override the clone URL). Requires `git`, Python 3.10+, and bash. It runs on Linux, WSL, and macOS, and
 on native Windows through Git Bash (the Bash tool Claude Code uses there).
 
 ## When to use
@@ -21,10 +21,13 @@ Trigger whenever the user supplies a YouTube URL or a bare 11-character video ID
 Use the bundled Bash wrapper at `scripts/run.sh`. It handles the full venv lifecycle so we don't depend on whatever Python happens to be on PATH or a stale global pip install:
 
 1. cd into the yt-transcript project
-2. Pick a venv whose interpreter exists on this platform, or create the first one:
+2. Pick a venv whose interpreter runs Python 3.10+ on this platform, or create
+   the first unused candidate with a working Python 3.10+ launcher:
    Linux/WSL `.venv_linux` > `.venv`; macOS `.venv` > `.venv_linux`; Windows
    `.venv` > `.venv_windows` (`Scripts/python.exe`). WSL and Windows can share one
-   clone without clobbering each other's venv.
+   clone without clobbering each other's venv. Old or broken environments are
+   skipped and preserved. If every candidate exists but none is compatible,
+   stop with instructions to recreate one; do not install into an old venv.
 3. Install `requirements.txt` if `youtube_transcript_api` isn't importable
 4. Run `yt_transcript.py` with the venv's Python and whatever args we pass
 

@@ -248,58 +248,42 @@ informational notices), do not create the script — state "no fix script
 generated — no actual vulns" in the report's Recommended fixes section instead.
 Tell the user the script path (or that none was needed) alongside the report path.
 
-### 9. Create shareable copies (always)
+### 9. Prepare a minimal share draft (always)
 
-The report, fix script, and log contain the user's local absolute paths and home
-directory. Always produce sanitized copies the user can paste into an upstream
-issue or hand to a third party, in:
+Raw scanner output can contain credentials, proprietary source excerpts, private
+URLs, and identifiers. The local report and fix script can repeat these details.
+Path/username replacement and a successful grep are **not** sufficient redaction.
+Keep the originals private in `.scan-reports/` for diagnosis.
 
-```
-<target>/.scan-reports/share/
-```
-
-Copy the report, the fix script (if one was generated), and the raw log, then
-sanitize every file:
-
-- the absolute target path → `~/code/<repo-name>` (both with and without the
-  leading `/` — OSV prints source paths without it),
-- the user's home directory → `~`,
-- the local path of this skill's `scan-download` script → the literal text
-  `scan-download (scan-source plugin)`,
-- in the fix script, set `TARGET="$HOME/code/<repo-name>"` so it stays runnable.
-
-Then **leak-check**: grep the `share/` directory for the username and for
-distinctive fragments of the real paths — the grep must come back empty before
-you hand the files over. Re-run `bash -n` on the sanitized fix script.
-
-Append a **"Reproduce this scan"** section to the shared report so recipients
-can run the same scan themselves:
-
-````markdown
-## Reproduce this scan
-
-The scan ran with the **scan-source** plugin from the Chameleon Labs
-marketplace (GuardDog malware heuristics, Trivy + OSV-Scanner CVE/secret
-scanning, Semgrep SAST).
-
-Install the plugin in Claude Code:
-
-```
-/plugin marketplace add Chameleon-Labs-LLC/plugins
-/plugin install scan-source@chameleon-labs
-```
-
-Or from the terminal:
+Do not copy the raw log, private report, or fix script into share output. Create a
+fresh draft that reads none of them, using the bundled stdlib-only helper:
 
 ```bash
-claude plugin marketplace add Chameleon-Labs-LLC/plugins
-claude plugin install scan-source@chameleon-labs
+python3 "$SKILL_DIR/scripts/prepare-share.py" \
+  --output-dir "<target>/.scan-reports/share/scan-<timestamp>"
 ```
 
-Verify with `/plugin list`, then run `/scan-source ~/code/<repo-name>`. On
-first use the skill installs the scanner CLIs it needs (pipx + static binaries
-in `~/.local/bin`, no sudo). Reports land in `<target>/.scan-reports/`.
-````
+Use the log's timestamp. The helper creates only `report.md` and refuses an
+existing output directory. Choose a fresh suffix on reruns; do not reuse old
+exports. Prior files under `share/` are unreviewed legacy artifacts: never attach
+or archive the whole directory, and do not delete the user's old files.
+
+Fill the draft with only reviewed public facts: public advisory identifiers,
+public package/version details, aggregate layer outcomes (including errors and
+skips), and general remediation. Keep the generic reproduction instructions and
+record reviewed scan flags. Do not paste scanner text or source excerpts. Omit
+credentials, private package/repository names, private URLs, usernames, local
+paths, and confidential details even when they occur in benign findings or fix
+commands. If uncertain whether a detail is public, omit it.
+
+Review the **entire final draft**, including any links and reproduction details,
+for sensitive content. Searches for known planted/observed secrets and local
+identifiers can supplement this review but cannot prove arbitrary text safe.
+Tell the user the exact draft path and that raw evidence/fix scripts remain local.
+Any separately requested evidence export needs its own content review; never
+include it automatically. Sending, uploading, or filing **any** artifact requires
+explicit approval of the exact content and destination. Preparing a local draft
+is not approval to share it.
 
 ### 10. Offer to file an upstream issue (if the project allows it)
 
@@ -323,8 +307,8 @@ never file without asking.
    what the issue will say, and any template/conventions the repo requires
    (e.g. an agent-attribution line if the repo's docs mandate one). Filing an
    issue is outward-facing — it needs explicit consent every time.
-5. On yes: file with `gh issue create`, drawing the body from the **sanitized
-   shared report** (step 9), never from the unsanitized files. Give the user
+5. On yes: file with `gh issue create`, drawing the body from the **reviewed
+   share draft** (step 9), never from the private originals or raw logs. Give the user
    the issue URL.
 
 ## Allowlisting known-benign GuardDog hits

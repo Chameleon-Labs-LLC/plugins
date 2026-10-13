@@ -134,6 +134,73 @@ def test_marketplace_plugin_version_is_detected(tmp_path):
     assert any("metadata.version" in n for n in notes)
 
 
+@pytest.mark.parametrize("source", ["./", "./example-plugin"])
+def test_single_plugin_release_syncs_local_manifest(tmp_path, source):
+    repo = new_repo(tmp_path)
+    market = MARKETPLACE.replace('"source": "./"', f'"source": "{source}"')
+    rel = Path(source) / ".claude-plugin/plugin.json"
+    manifest = _plugin_json("example-plugin", "0.3.0")
+    commit(repo, "init", {".claude-plugin/marketplace.json": market,
+                          str(rel): manifest})
+    canonical, mirrors, _ = vt.detect(repo)
+    assert canonical.kind == "marketplace"
+    assert any(m.path == rel and m.value == "0.3.0" for m in mirrors)
+    assert vt.main(["--repo", str(repo), "release", "minor"]) == 0
+    assert (repo / rel).read_text() == manifest
+    assert not vt.is_dirty(repo)
+    assert not vt.existing_tags(repo)
+    assert vt.main(["--repo", str(repo), "release", "minor", "--apply"]) == 0
+    assert (repo / rel).read_text() == manifest.replace("0.3.0", "0.4.0")
+    assert (repo / ".claude-plugin/marketplace.json").read_text() == market.replace(
+        '"version": "0.3.0"', '"version": "0.4.0"')
+    assert "## [0.4.0]" in (repo / "CHANGELOG.md").read_text()
+    assert "v0.4.0" in vt.existing_tags(repo)
+    assert not vt.is_dirty(repo)
+
+
+@pytest.mark.parametrize("manifest", [
+    '{"name": "example-plugin", "version": "0.2.0"}',
+    '{"name": "example-plugin"}',
+    '{invalid json',
+    'null',
+])
+def test_single_plugin_release_refuses_invalid_or_disagreeing_manifest(tmp_path, manifest):
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {".claude-plugin/marketplace.json": MARKETPLACE,
+                          ".claude-plugin/plugin.json": manifest})
+    assert vt.main(["--repo", str(repo), "release", "patch", "--apply"]) == 1
+    assert not vt.is_dirty(repo)
+    assert not vt.existing_tags(repo)
+
+
+def test_single_plugin_release_refuses_non_utf8_manifest(tmp_path):
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {".claude-plugin/marketplace.json": MARKETPLACE})
+    manifest = repo / ".claude-plugin/plugin.json"
+    manifest.write_bytes(b'\xff{"version": "0.3.0"}')
+    commit(repo, "fixture: unreadable manifest")
+    assert vt.main(["--repo", str(repo), "release", "patch", "--apply"]) == 1
+    assert not vt.is_dirty(repo)
+    assert not vt.existing_tags(repo)
+
+
+def test_single_plugin_release_refuses_manifest_read_error(tmp_path, monkeypatch):
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {".claude-plugin/marketplace.json": MARKETPLACE,
+                          ".claude-plugin/plugin.json": _plugin_json("example-plugin", "0.3.0")})
+    read_text = Path.read_text
+
+    def unreadable(path, *args, **kwargs):
+        if path == repo / ".claude-plugin/plugin.json":
+            raise PermissionError("fixture: cannot read manifest")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+    assert vt.main(["--repo", str(repo), "release", "patch", "--apply"]) == 1
+    assert not vt.is_dirty(repo)
+    assert not vt.existing_tags(repo)
+
+
 def test_marketplace_with_many_plugins_and_no_catalog_version_is_noted(tmp_path):
     """Several plugins, each with its own version, and no metadata.version —
     no single repo version exists, so the tool must not pick plugins[0]."""

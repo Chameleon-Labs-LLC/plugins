@@ -26,7 +26,10 @@ cd "$PROJECT"
 # does not run on the other, so each platform keeps its own:
 #   Linux/WSL: .venv_linux (bin/python)   macOS: .venv (bin/python)
 #   Windows:   .venv or .venv_windows (Scripts/python.exe)
-# A candidate counts only if its interpreter exists for this platform.
+# Every interpreter, including a reused venv, must run Python 3.10+.
+supported_python() {
+    "$@" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1
+}
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
         VENVS=(.venv .venv_windows); VENV_PY="Scripts/python.exe"; BOOT=("py -3" python python3) ;;
@@ -38,19 +41,21 @@ esac
 
 VENV=""
 for v in "${VENVS[@]}"; do
-    if [ -x "$v/$VENV_PY" ]; then VENV="$v"; break; fi
+    if [ -x "$v/$VENV_PY" ] && supported_python "$v/$VENV_PY"; then
+        VENV="$v"; break
+    fi
 done
 
 if [ -z "$VENV" ]; then
     # Create the first candidate that does not exist yet. An existing one
-    # belongs to the other platform (e.g. a Linux .venv in a clone shared
-    # with Windows), and `python -m venv` would merge into it.
+    # may belong to the other platform, be broken, or use an older Python.
+    # Never merge into or replace an existing environment.
     for v in "${VENVS[@]}"; do
-        if [ ! -e "$v" ]; then VENV="$v"; break; fi
+        if [ ! -e "$v" ] && [ ! -L "$v" ]; then VENV="$v"; break; fi
     done
     if [ -z "$VENV" ]; then
-        echo "ERROR: ${VENVS[*]} all exist in $PROJECT but none has $VENV_PY." >&2
-        echo "Remove the broken one and re-run." >&2
+        echo "ERROR: ${VENVS[*]} all exist in $PROJECT but none has a working Python 3.10+ at $VENV_PY." >&2
+        echo "Recreate one with Python 3.10+ after reviewing its contents, then re-run." >&2
         exit 1
     fi
     # On Windows, "python3" may be the Microsoft Store stub, which exits
@@ -58,12 +63,12 @@ if [ -z "$VENV" ]; then
     PYBOOT=()
     for cand in "${BOOT[@]}"; do
         read -r -a cmd <<<"$cand"
-        if "${cmd[@]}" -c 'import sys; sys.exit(sys.version_info < (3, 8))' >/dev/null 2>&1; then
+        if supported_python "${cmd[@]}"; then
             PYBOOT=("${cmd[@]}"); break
         fi
     done
     if [ "${#PYBOOT[@]}" -eq 0 ]; then
-        echo "ERROR: no Python 3.8+ found (tried: ${BOOT[*]})." >&2
+        echo "ERROR: no Python 3.10+ found (tried: ${BOOT[*]})." >&2
         exit 1
     fi
     echo ">>> No venv found. Creating $PROJECT/$VENV with ${PYBOOT[*]} ..."
@@ -71,6 +76,10 @@ if [ -z "$VENV" ]; then
 fi
 
 PY="$VENV/$VENV_PY"
+if ! supported_python "$PY"; then
+    echo "ERROR: $PY must run Python 3.10+; recreate this environment and re-run." >&2
+    exit 1
+fi
 # Windows consoles default to cp1252; transcripts are often not ASCII.
 export PYTHONUTF8=1
 

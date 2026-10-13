@@ -83,7 +83,10 @@ An empty `{}` `package.json` is a stub and is skipped, not filled.
 **Claude Code plugin marketplaces** (`.claude-plugin/marketplace.json`):
 
 - **One plugin:** that plugin entry's `version` is canonical. `metadata.version`
-  is the catalog's own series and is left alone.
+  is the catalog's own series and is left alone. For a local source (`./` or
+  `./plugin-dir`), its `.claude-plugin/plugin.json`, when present, is a mirror
+  updated by ordinary `release` without `--plugin`. Disagreeing or invalid
+  manifest versions block release before either file is changed.
 - **Several plugins with `metadata.version`:** `metadata.version` is canonical.
   It drives the changelog and the `v*` tag. Each plugin keeps its own version.
   Bump plugins in the same release with repeatable `--plugin NAME[=LEVEL]`

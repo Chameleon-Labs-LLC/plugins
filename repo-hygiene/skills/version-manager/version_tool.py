@@ -158,7 +158,7 @@ class Location:
     path: Path          # relative to repo root
     kind: str
     value: str | None
-    mirror_only: bool = False   # display string, never canonical (README)
+    mirror_only: bool = False   # dependent version, never canonical
 
     @property
     def label(self) -> str:
@@ -262,6 +262,15 @@ def detect(repo: Path) -> tuple[Location | None, list[Location], list[str]]:
                 if meta:
                     notes.append(f"{rel}: metadata.version is the catalog's own "
                                  "series — left unmanaged")
+                # The sole entry is the repo version; its local manifest is
+                # another home for that same version, even in a dot-directory.
+                # Keep invalid values as mirrors so release's disagreement
+                # guard refuses before writing either file.
+                for _, pdir in _local_plugins(repo, rel):
+                    manifest = _plugin_json_version(repo, pdir) if pdir is not None else None
+                    if manifest is not None:
+                        found.append(Location(manifest[0], "package_json",
+                                              manifest[1], mirror_only=True))
         value = _extract(text, kind)
         if value is None:
             continue
@@ -391,13 +400,19 @@ def _local_plugins(repo: Path, rel: Path) -> list[tuple[dict, Path | None]]:
 
 def _plugin_json_version(repo: Path, pdir: Path) -> tuple[Path, str | None] | None:
     rel = pdir / ".claude-plugin" / "plugin.json"
-    text = _read(repo, rel)
-    if text is None:
-        return None
     try:
-        declared = str(json.loads(text).get("version") or "")
+        text = (repo / rel).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return (rel, None) if (repo / rel).is_symlink() else None
+    except (OSError, UnicodeDecodeError):
+        return rel, None
+    try:
+        data = json.loads(text)
     except json.JSONDecodeError:
         return rel, None
+    if not isinstance(data, dict):
+        return rel, None
+    declared = str(data.get("version") or "")
     return rel, declared if _extract(text, "package_json") == declared else None
 
 
@@ -848,7 +863,7 @@ def cmd_check(repo: Path, **_: object) -> int:
         print(f"  canonical: {canonical.label} = {canonical.value}")
     for m in mirrors:
         flag = "" if m.value == (canonical.value if canonical else None) else "  <-- DISAGREES"
-        kind = "display" if m.mirror_only else "mirror"
+        kind = "display" if m.kind == "readme" else "mirror"
         print(f"  {kind}: {m.label} = {m.value}{flag}")
     if canonical and canonical.kind == "marketplace_meta":
         for entry, pdir in _local_plugins(repo, canonical.path):
