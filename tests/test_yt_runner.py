@@ -28,7 +28,8 @@ if args[0] == "-c":
 elif args[:2] == ["-m", "venv"]:
     target = pathlib.Path(args[2]) / os.environ["VENV_PY"]
     target.parent.mkdir(parents=True)
-    target.write_text(os.environ["SHIM"], encoding="utf-8")
+    # These are shell scripts even when the probe runs under native Windows.
+    target.write_bytes(os.environ["SHIM"].encode("utf-8"))
     target.chmod(0o755)
 elif args[0] == "yt_transcript.py":
     print("RUN", minor, json.dumps(args[1:]))
@@ -101,5 +102,8 @@ def test_runner_requires_supported_working_python(tmp_path, platform, case):
             assert (project / venvs[1] / venv_py).is_file()
         if case in ("supported_venv", "fallback_venv"):
             assert not any(args[:2] == ["-m", "venv"] for _, args in calls)
+    for path in project.rglob("*"):
+        if path.is_file():
+            assert b"\r\n" not in path.read_bytes(), "shell fixtures must use LF on every platform"
     for path, content in originals.items():
         assert path.read_bytes() == content, "existing environments must be preserved"

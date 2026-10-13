@@ -76,3 +76,12 @@ python -m pytest repo-hygiene/skills/version-manager/tests/ tests/ -q
 - This note records local validation before pushing the fixes. Release tests
   create commits/tags only inside disposable fixtures. No version bump or
   release is part of this patch.
+
+## CI fixture correction
+
+The first pushed commit passed the Ubuntu and macOS jobs, including stock
+macOS Bash 3.2. Windows CI exposed CRLF in the generated fake venv interpreter
+scripts used by the new transcript tests. Explicit LF assertions reproduced
+all nine affected cases locally. The fixture now writes UTF-8 bytes, matching
+the existing executable-fixture helper; the production runner is unchanged.
+The assertions remain to catch this independently of a shell's CRLF tolerance.
