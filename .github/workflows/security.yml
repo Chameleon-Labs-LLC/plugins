@@ -34,6 +34,11 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Install gitleaks 8.30.1 (checksum-verified release binary)
+        # Download and unpack OUTSIDE the checkout: a pull request could commit
+        # a symlink named like a download (e.g. osv-scanner_SHA256SUMS ->
+        # requirements.txt) and curl would write through it, replacing a
+        # manifest the scan is meant to read. RUNNER_TEMP is emptied per job.
+        working-directory: ${{ runner.temp }}
         run: |
           set -eu
           V=8.30.1
@@ -116,6 +121,11 @@ jobs:
         with:
           persist-credentials: false
       - name: Install osv-scanner 2.7.0 (checksum-verified release binary)
+        # Download and unpack OUTSIDE the checkout: a pull request could commit
+        # a symlink named like a download (e.g. osv-scanner_SHA256SUMS ->
+        # requirements.txt) and curl would write through it, replacing a
+        # manifest the scan is meant to read. RUNNER_TEMP is emptied per job.
+        working-directory: ${{ runner.temp }}
         run: |
           set -eu
           V=2.7.0
