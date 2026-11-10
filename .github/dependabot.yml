@@ -1,0 +1,39 @@
+# Dependabot: free, GitHub-side dependency monitoring.
+#
+# This repository has no package manifests, so Dependabot watches only the
+# GitHub Actions pinned in .github/workflows/.
+#   - Actions are pinned to commit SHAs. GitHub raises no Dependabot alerts for
+#     SHA pins, so no security-update PR can ever fire for an action: the
+#     weekly VERSION update below is the only remediation path, and advisory
+#     DETECTION comes from the osv-scanner job in security.yml.
+#   - cooldown mirrors a 7-day minimum package age, a supply-chain defense
+#     against a freshly published malicious release. When osv-scanner reports
+#     a vulnerable action, bump the pin by hand instead of waiting.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:30"
+      timezone: America/Chicago
+    # 2, not 1: a major-version update falls outside the `actions` group and
+    # opens its own PR; with a limit of 1 it would block the weekly group PR.
+    open-pull-requests-limit: 2
+    cooldown:
+      default-days: 7
+    groups:
+      # No `applies-to: security-updates` group here: it could never fire,
+      # because SHA-pinned actions get no Dependabot alerts.
+      actions:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    # NO semver-major ignore here, unlike the other ecosystems, and that is
+    # deliberate. GitHub generates Dependabot alerts only for actions on
+    # semantic versions, NOT for SHA pins (docs: "About Dependabot alerts"),
+    # so no security update can ever fire for a pinned action. A weekly
+    # VERSION update is therefore the only remediation path that exists, and
+    # ignoring majors would remove it. Advisory DETECTION comes from the
+    # `github/actions` osv-scanner plugin named in security.yml.
