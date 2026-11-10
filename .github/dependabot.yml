@@ -1,25 +1,14 @@
-# Dependabot: free, GitHub-side dependency and advisory monitoring.
+# Dependabot: free, GitHub-side dependency monitoring.
 #
-# Shape:
-#   - Security updates are grouped into ONE PR per ecosystem so a bad week does
-#     not open fifteen PRs.
-#   - Version updates run weekly, minor+patch only, grouped. Majors are done by
-#     hand with a changelog read. The `ignore` of semver-major below gates
-#     VERSION updates only: SECURITY updates walk past it, so a security fix
-#     that lives in a new major still arrives as a PR. "No PR" never means
-#     "no vulnerability" -- transitive-only deps and advisories with no fixed
-#     version show up only as alerts. Read the alerts.
-#   - cooldown mirrors the 7-day minimum-package-age rule for version updates.
-#     Security updates are not delayed by cooldown: remediation wins.
-#   - A Dependabot PR carries no version bump; fold it into the next release.
-#
-# ROLLOUT NOTE: keep only the ecosystems this repo actually has, and set
-# `directory`/`directories` to where the manifests really live. A pip block
-# deliberately omits `update-types` from its version-update group: projects
-# that declare loose floors (`httpx>=0.27`) get REQUIREMENT changes, which
-# carry no from->to pair and therefore match NO `update-types` value -- adding
-# the filter silently drops every such update out of the group and opens one PR
-# each.
+# This repository has no package manifests, so Dependabot watches only the
+# GitHub Actions pinned in .github/workflows/.
+#   - Actions are pinned to commit SHAs. GitHub raises no Dependabot alerts for
+#     SHA pins, so no security-update PR can ever fire for an action: the
+#     weekly VERSION update below is the only remediation path, and advisory
+#     DETECTION comes from the osv-scanner job in security.yml.
+#   - cooldown mirrors a 7-day minimum package age, a supply-chain defense
+#     against a freshly published malicious release. When osv-scanner reports
+#     a vulnerable action, bump the pin by hand instead of waiting.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -29,7 +18,9 @@ updates:
       day: monday
       time: "07:30"
       timezone: America/Chicago
-    open-pull-requests-limit: 1
+    # 2, not 1: a major-version update falls outside the `actions` group and
+    # opens its own PR; with a limit of 1 it would block the weekly group PR.
+    open-pull-requests-limit: 2
     cooldown:
       default-days: 7
     groups:
