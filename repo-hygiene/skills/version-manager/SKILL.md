@@ -83,6 +83,13 @@ release.
 `README.md`'s `**Version X.Y.Z**` display is always a mirror, never canonical.
 An empty `{}` `package.json` is a stub and is skipped, not filled.
 
+Also detected: a `.csproj` `<Version>` (every declaration in the file moves
+together; two that disagree are drift and `release` refuses), and a
+single-plugin `.claude-plugin/marketplace.json`, where the version is the
+plugin entry's own `version` key (never `metadata.version`, never a nested
+`source.version`). When that plugin's source is a folder in the repo and it
+has its own `.claude-plugin/plugin.json`, that file's `version` is a mirror.
+
 ## Gotchas
 
 - **`release` refuses on a dirty tree, an existing tag, or disagreeing version

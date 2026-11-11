@@ -166,6 +166,231 @@ def test_release_bumps_marketplace_plugin_not_metadata(tmp_path):
     assert "v0.4.0" in vt.existing_tags(repo)
 
 
+# A plugin entry whose npm-style source carries its own version pin, placed
+# BEFORE the entry's own version. "The first version after plugins" is the pin.
+MARKETPLACE_NPM = """{
+  "name": "example-marketplace",
+  "metadata": { "version": "0.2.0" },
+  "plugins": [
+    {
+      "name": "example-plugin",
+      "source": { "source": "npm", "package": "@example/plugin", "version": "%s" },
+      "description": "one plugin, \\"quoted\\" { braces ] in a string",
+      "version": "0.3.0"
+    }
+  ]
+}
+"""
+
+
+def test_release_bumps_the_plugin_entry_not_its_nested_source_pin(tmp_path):
+    """plugins#9 review: with source.version equal to the entry's version the
+    old first-match pattern passed detect()'s equality check and a release
+    rewrote the source pin, leaving the entry's own version behind."""
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {
+        ".claude-plugin/marketplace.json": MARKETPLACE_NPM % "0.3.0",
+        "CHANGELOG.md": CHANGELOG.format(v="0.3.0", d="2026-08-01"),
+    }, when="2026-08-01T10:00:00")
+    commit(repo, "feat: new skill", when="2026-08-06T10:00:00")
+
+    assert vt.main(["--repo", str(repo), "release", "minor", "--apply"]) == 0
+
+    text = (repo / ".claude-plugin/marketplace.json").read_text()
+    entry = json.loads(text)["plugins"][0]
+    assert entry["version"] == "0.4.0"
+    assert entry["source"]["version"] == "0.3.0", "source pin was rewritten"
+    assert json.loads(text)["metadata"]["version"] == "0.2.0"
+    # Surgical: only the three digits groups moved.
+    assert text == (MARKETPLACE_NPM % "0.3.0").replace(
+        '"version": "0.3.0"\n    }', '"version": "0.4.0"\n    }')
+
+
+def test_marketplace_with_a_different_source_pin_is_still_tracked(tmp_path):
+    """A source pin that differs from the entry used to read as a 'pattern
+    mismatch' and the repo lost its only version home."""
+    repo = new_repo(tmp_path)
+    commit(repo, "init",
+           {".claude-plugin/marketplace.json": MARKETPLACE_NPM % "7.1.2"})
+    canonical, _mirrors, notes = vt.detect(repo)
+    assert canonical is not None and canonical.value == "0.3.0"
+    assert not any("mismatch" in n for n in notes)
+
+
+def test_version_span_reads_only_the_owned_key():
+    span = vt._version_span(MARKETPLACE_NPM % "9.9.9", "marketplace")
+    assert span is not None
+    assert (MARKETPLACE_NPM % "9.9.9")[span[0]:span[1]] == "0.3.0"
+    # plugin.json: the top-level key, never a nested one that comes first.
+    manifest = '{"author": {"version": "5.5.5"}, "name": "p", "version": "1.2.3"}'
+    a, b = vt._version_span(manifest, "plugin_json")
+    assert manifest[a:b] == "1.2.3"
+    assert vt._version_span('{"name": "p"}', "plugin_json") is None
+    assert vt._version_span('{"plugins": [], "version": "1.0.0"}', "marketplace") is None
+    assert vt._version_span('{"plugins": [{"version": 3}]}', "marketplace") is None
+    assert vt._version_span('{"plugins": [{"version": "1.0.0"', "marketplace") is None
+    assert vt._version_span("not json", "marketplace") is None
+
+
+PLUGIN_JSON = """{
+  "name": "example-plugin",
+  "description": "the plugin's own manifest",
+  "version": "%s",
+  "author": { "name": "Example" }
+}
+"""
+
+
+def test_single_plugin_manifest_is_a_mirror_and_is_bumped(tmp_path):
+    """plugins#9 review / Codex: a single-plugin marketplace with source "./"
+    and its own .claude-plugin/plugin.json got only the marketplace bumped."""
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {
+        ".claude-plugin/marketplace.json": MARKETPLACE,
+        ".claude-plugin/plugin.json": PLUGIN_JSON % "0.3.0",
+        "CHANGELOG.md": CHANGELOG.format(v="0.3.0", d="2026-08-01"),
+    }, when="2026-08-01T10:00:00")
+    commit(repo, "fix: thing", when="2026-08-06T10:00:00")
+
+    canonical, mirrors, _notes = vt.detect(repo)
+    assert canonical.kind == "marketplace"
+    assert [(m.path, m.kind, m.value) for m in mirrors] == [
+        (Path(".claude-plugin/plugin.json"), "plugin_json", "0.3.0")]
+
+    assert vt.main(["--repo", str(repo), "release", "patch", "--apply"]) == 0
+    assert json.loads((repo / ".claude-plugin/marketplace.json").read_text()
+                      )["plugins"][0]["version"] == "0.3.1"
+    assert (repo / ".claude-plugin/plugin.json").read_text() == PLUGIN_JSON % "0.3.1"
+
+
+def test_plugin_manifest_drift_is_reported_and_blocks_release(tmp_path, capsys):
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {
+        ".claude-plugin/marketplace.json": MARKETPLACE,
+        ".claude-plugin/plugin.json": PLUGIN_JSON % "0.2.9",
+    })
+    assert vt.main(["--repo", str(repo), "check"]) == 0
+    out = capsys.readouterr().out
+    assert "plugin.json (plugin_json) = 0.2.9  <-- DISAGREES" in out
+    assert vt.main(["--repo", str(repo), "release", "patch", "--apply"]) == 1
+    assert "version locations disagree" in capsys.readouterr().out
+
+
+def test_plugin_manifest_follows_the_entrys_source_folder(tmp_path):
+    """The manifest lives where the entry's source points; a manifest with no
+    version key, or a source outside the repo, adds no location."""
+    repo = new_repo(tmp_path)
+    market = json.loads(MARKETPLACE)
+    market["plugins"][0]["source"] = "./plugins/example"
+    commit(repo, "init", {
+        ".claude-plugin/marketplace.json": json.dumps(market, indent=2),
+        "plugins/example/.claude-plugin/plugin.json": PLUGIN_JSON % "0.3.0",
+        ".claude-plugin/plugin.json": '{"name": "root has no version"}\n',
+    })
+    _canonical, mirrors, _notes = vt.detect(repo)
+    assert [m.path for m in mirrors] == [
+        Path("plugins/example/.claude-plugin/plugin.json")]
+
+    market["plugins"][0]["source"] = "../elsewhere"
+    commit(repo, "move", {
+        ".claude-plugin/marketplace.json": json.dumps(market, indent=2)})
+    assert vt.detect(repo)[1] == []
+    market["plugins"][0]["source"] = "./"
+    commit(repo, "root", {
+        ".claude-plugin/marketplace.json": json.dumps(market, indent=2)})
+    assert vt.detect(repo)[1] == [], "a manifest without a version is no location"
+
+
+def test_ledger_reads_marketplace_versions_from_history(tmp_path, capsys):
+    """.claude_code: 16 tags, yet `check` said '0 bumps in history' because
+    marketplace.json was read as a Python constant file. A real history must
+    never be classified as a placeholder."""
+    repo = new_repo(tmp_path)
+    for i, v in enumerate(("0.1.0", "0.2.0", "0.3.0")):
+        commit(repo, f"chore(release): v{v}", {
+            ".claude-plugin/marketplace.json": MARKETPLACE.replace("0.3.0", v),
+        }, when=f"2026-08-0{i + 1}T10:00:00")
+    # metadata.version moving on its own is not a release of the repo.
+    commit(repo, "chore: catalog series", {
+        ".claude-plugin/marketplace.json":
+            MARKETPLACE.replace('"version": "0.2.0"', '"version": "0.9.0"'),
+    }, when="2026-08-04T10:00:00")
+
+    canonical, _mirrors, _notes = vt.detect(repo)
+    ledger = vt.git_ledger(repo, canonical)
+    assert [e.version for e in ledger] == ["0.1.0", "0.2.0", "0.3.0"]
+    assert [e.date for e in ledger] == ["2026-08-01", "2026-08-02", "2026-08-03"]
+    assert not vt.is_placeholder(ledger, 0)
+
+    assert vt.main(["--repo", str(repo), "check"]) == 0
+    assert "real record — 3 bumps in history" in capsys.readouterr().out
+
+
+def test_ledger_skips_commits_where_the_marketplace_listed_several_plugins(tmp_path):
+    repo = new_repo(tmp_path)
+    market = json.loads(MARKETPLACE)
+    two = dict(market, plugins=market["plugins"] + [
+        dict(market["plugins"][0], name="second", version="4.0.0")])
+    commit(repo, "two plugins", {
+        ".claude-plugin/marketplace.json": json.dumps(two, indent=2)},
+        when="2026-08-01T10:00:00")
+    commit(repo, "one plugin", {
+        ".claude-plugin/marketplace.json": MARKETPLACE},
+        when="2026-08-02T10:00:00")
+    canonical, _mirrors, _notes = vt.detect(repo)
+    assert [e.version for e in vt.git_ledger(repo, canonical)] == ["0.3.0"]
+
+
+CSPROJ = """<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Version>%s</Version>
+    <AssemblyVersion>%s.0</AssemblyVersion>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)'=='Release'">
+    <Version>%s</Version>
+    <FileVersion>%s.0</FileVersion>
+  </PropertyGroup>
+</Project>
+"""
+
+
+def test_csproj_release_moves_every_version_declaration(tmp_path):
+    """plugins#9 review: with <Version> in two property groups only the first
+    was written, so a release tagged 0.4.0 while the later group built 0.3.0."""
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {
+        "App/App.csproj": CSPROJ % (("0.3.0",) * 4),
+        "CHANGELOG.md": CHANGELOG.format(v="0.3.0", d="2026-08-01"),
+    }, when="2026-08-01T10:00:00")
+    commit(repo, "feat: thing", when="2026-08-06T10:00:00")
+
+    canonical, mirrors, notes = vt.detect(repo)
+    assert canonical.kind == "csproj" and canonical.value == "0.3.0"
+    assert not mirrors and not any("disagree" in n for n in notes)
+
+    assert vt.main(["--repo", str(repo), "release", "minor", "--apply"]) == 0
+    assert (repo / "App/App.csproj").read_text() == CSPROJ % (("0.4.0",) * 4)
+
+
+def test_csproj_with_disagreeing_declarations_is_refused(tmp_path, capsys):
+    repo = new_repo(tmp_path)
+    before = CSPROJ % ("0.3.0", "0.3.0", "0.2.0", "0.2.0")
+    commit(repo, "init", {"App/App.csproj": before})
+
+    canonical, mirrors, notes = vt.detect(repo)
+    assert canonical.value == "0.3.0"
+    assert [(m.kind, m.value) for m in mirrors] == [("csproj", "0.2.0")]
+    assert any("declares 2 versions that disagree (0.3.0, 0.2.0)" in n
+               for n in notes)
+
+    assert vt.main(["--repo", str(repo), "check"]) == 0
+    assert "= 0.2.0  <-- DISAGREES" in capsys.readouterr().out
+    assert vt.main(["--repo", str(repo), "release", "patch", "--apply"]) == 1
+    assert "version locations disagree" in capsys.readouterr().out
+    assert (repo / "App/App.csproj").read_text() == before, "refusal wrote"
+
+
 def test_version_file_with_trailing_comments_is_detected(tmp_path):
     """A Python service's VERSION has explanatory comments under the number;
     requiring a bare file left it undetected and it would go stale."""
