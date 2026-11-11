@@ -356,6 +356,40 @@ def test_ledger_reads_a_csproj_version_split_across_lines(tmp_path):
         == ["0.2.0", "0.3.0", "0.4.0"]
 
 
+CSPROJ_COMMENTED = """<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Was <Version>0.1.0</Version> before the rename; kept for reference.
+       <AssemblyVersion>0.1.0.0</AssemblyVersion> -->
+  <PropertyGroup>
+    <Version>%s</Version>
+    <AssemblyVersion>%s.0</AssemblyVersion>
+    <!-- <Version>9.9.9</Version> -->
+  </PropertyGroup>
+</Project>
+"""
+
+
+def test_a_version_inside_an_xml_comment_is_neither_read_nor_rewritten(tmp_path):
+    """plugins#9 review: `<!-- <Version>1.0.0</Version> -->` was detected as
+    a declaration and rewritten by a release."""
+    text = CSPROJ_COMMENTED % ("0.3.0", "0.3.0")
+    assert vt._extract(text, "csproj") == "0.3.0"          # not the commented 0.1.0
+    assert vt._extract_all(text, "csproj") == ["0.3.0"]    # no false disagreement
+    only_commented = "<Project><!-- <Version>1.0.0</Version> --></Project>"
+    assert vt._extract(only_commented, "csproj") is None
+
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {
+        "App.csproj": text,
+        "CHANGELOG.md": CHANGELOG.format(v="0.3.0", d="2026-08-01"),
+    }, when="2026-08-01T10:00:00")
+    commit(repo, "fix: thing", when="2026-08-06T10:00:00")
+    canonical, mirrors, _notes = vt.detect(repo)
+    assert canonical.value == "0.3.0" and mirrors == []
+    assert vt.main(["--repo", str(repo), "release", "patch", "--apply"]) == 0
+    # Only the live declarations moved; both comments are byte-for-byte intact.
+    assert (repo / "App.csproj").read_text() == CSPROJ_COMMENTED % ("0.3.1", "0.3.1")
+
+
 def test_marketplace_of_the_wrong_shape_is_skipped_not_crashed_on(tmp_path):
     repo = new_repo(tmp_path)
     for body in ('[]', '"just a string"', '{"plugins": {"a": 1}}',
