@@ -311,6 +311,21 @@ def _read(repo: Path, rel: Path) -> str | None:
         return None
 
 
+def _inside(repo: Path, rel: Path) -> bool:
+    """True when repo/rel, with every symlink followed, is still in the repo.
+
+    A tracked symlink can point anywhere. Reading through one is harmless;
+    WRITING a version through one changes a file outside the repository, so
+    every version location is checked before it is trusted or written.
+    """
+    try:
+        root = repo.resolve()
+        target = (repo / rel).resolve()
+    except (OSError, RuntimeError):
+        return False
+    return target == root or root in target.parents
+
+
 def _write(path: Path, text: str) -> None:
     """Write text keeping the file's existing line endings.
 
@@ -378,6 +393,10 @@ def _plugin_manifest_for(repo: Path, plugin: dict) -> Path | None:
     rel = Path(os.path.normpath((Path(source) / PLUGIN_MANIFEST).as_posix()))
     if rel.is_absolute() or ".." in rel.parts:
         return None
+    # A `source` that is a symlink out of the repo passes both tests above
+    # and is_file() follows it: the manifest it reaches is someone else's.
+    if not _inside(repo, rel):
+        return None
     return rel if (repo / rel).is_file() else None
 
 
@@ -422,6 +441,13 @@ def detect(repo: Path) -> tuple[Location | None, list[Location], list[str]]:
     candidates = _candidate_files(repo)
 
     for rel, kind in candidates:
+        if not _inside(repo, rel):
+            # A version file that is a link out of the repository: releasing
+            # would rewrite someone else's file. Refuse, loudly.
+            notes.append(f"{BLOCKING}{rel} is a link to a file outside the "
+                         "repository; a release would write through it. "
+                         "Replace the link with a real file.")
+            continue
         text = _read(repo, rel)
         if text is None:
             continue
@@ -441,7 +467,10 @@ def detect(repo: Path) -> tuple[Location | None, list[Location], list[str]]:
             except json.JSONDecodeError:
                 notes.append(f"{rel}: unparseable, skipped")
                 continue
-            plugins = data.get("plugins") or []
+            plugins = data.get("plugins") if isinstance(data, dict) else None
+            if not isinstance(plugins, list):
+                notes.append(f"{rel}: no \"plugins\" list; skipped")
+                continue
             if len(plugins) != 1:
                 notes.append(f"{rel}: {len(plugins)} plugins — per-plugin "
                              "versions, no single repo version; skipped")
@@ -457,7 +486,8 @@ def detect(repo: Path) -> tuple[Location | None, list[Location], list[str]]:
                 notes.append(f"{rel}: plugin version missing or pattern "
                              "mismatch; skipped")
                 continue
-            if (data.get("metadata") or {}).get("version"):
+            metadata = data.get("metadata")
+            if isinstance(metadata, dict) and metadata.get("version"):
                 notes.append(f"{rel}: metadata.version is the catalog's own "
                              "series — left unmanaged")
             manifest = _plugin_manifest_for(repo, plugins[0])
@@ -521,6 +551,9 @@ def detect(repo: Path) -> tuple[Location | None, list[Location], list[str]]:
 
 
 def write_version(repo: Path, loc: Location, new: str) -> None:
+    if not _inside(repo, loc.path):
+        raise GitError(f"{loc.path} resolves to a file outside the "
+                       "repository; refusing to write it")
     text = _read(repo, loc.path)
     if text is None:
         raise GitError(f"cannot read {loc.path}")
@@ -661,6 +694,14 @@ def git_ledger(repo: Path, canonical: Location | None) -> list[Entry]:
                     text = _file_at(repo, sha, path)
                     record(_manifest_version(text, current_kind)
                            if text else None)
+                    current_kind = None
+                elif current_kind == "csproj":
+                    # detect() accepts <Version> split across lines; a diff
+                    # line never holds a split tag whole. Read the file as it
+                    # stood, and count it only when its declarations agree.
+                    declared = list(dict.fromkeys(_extract_all(
+                        _file_at(repo, sha, path) or "", "csproj")))
+                    record(declared[0] if len(declared) == 1 else None)
                     current_kind = None
                 continue
             if current_kind is None or not line.startswith("+"):
