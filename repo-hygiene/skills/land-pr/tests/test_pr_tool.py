@@ -507,11 +507,28 @@ def test_a_release_commit_is_mechanical_only_if_its_diff_is():
     for real in ("CHANGELOG.md", "Docs/CHANGELOG.md", "docs/CHANGELOG.md"):
         assert pt.release_diff_is_mechanical(
             bump[:1] + [f(real, "@@ -1 +1,2 @@\n # Changelog\n+- note")]), real
-    # A patch line that splits to an empty string must not crash the check
-    # (and with it the whole status run): form feeds split lines too.
+    # An empty patch line must not crash the check (and with it the whole
+    # status run).
     odd = f("package.json", '@@ -2 +2 @@\n-  "version": "1.4.1",\n'
-                            '+  "version": "1.4.2",\n+\x0c\x0cmore')
-    assert pt.release_diff_is_mechanical([odd]) is False
+                            '+  "version": "1.4.2",\n\n \n')
+    assert pt.release_diff_is_mechanical([odd]) is True
+    # plugins#10 review: a separator that str.splitlines() breaks on but an
+    # interpreter reads as whitespace hides code after a version line. The
+    # form feed case RUNS as Python: `__version__ = "1.0.1"<FF>;import os`.
+    for sep in ("\x0c", "\x0b", "\x1c", "\x1d", "\x1e", "\x85", " ", " "):
+        payload = f("src/version.py",
+                    '@@ -1 +1 @@\n-__version__ = "1.0.0"\n'
+                    f'+__version__ = "1.0.1"{sep};import os')
+        assert not pt.release_diff_is_mechanical([payload]), repr(sep)
+        assert not pt._version_line("version.py", f'__version__ = "1.0.1"{sep}'), repr(sep)
+    # A bare carriage return mid-line starts a new line for Python too.
+    cr = f("src/version.py", '@@ -1 +1 @@\n-__version__ = "1.0.0"\n'
+                             '+__version__ = "1.0.1"\rimport os')
+    assert not pt.release_diff_is_mechanical([cr])
+    # A file with CRLF endings is still a plain bump.
+    crlf = f("src/version.py", '@@ -1 +1 @@\n-__version__ = "1.0.0"\r\n'
+                               '+__version__ = "1.0.1"\r')
+    assert pt.release_diff_is_mechanical([crlf])
     # What the patch does not show cannot be vouched for.
     assert not pt.release_diff_is_mechanical([f("logo.png", None)])
     assert not pt.release_diff_is_mechanical([f("new.py", "@@ +1 @@\n+x", "added")])
@@ -778,7 +795,12 @@ def test_prs_stacked_on_the_merged_branch_are_moved_before_it_is_deleted(monkeyp
             if args[:2] == ("pr", "list") and "--base" in args:
                 if list_fails:
                     raise pt.ToolError("HTTP 502")
-                return "10\n"
+                # #10 is there until it has been moved; #11 is opened on the
+                # branch while #10 is being moved, and shows on the next look.
+                moved = [c[2] for c in calls if c[:2] == ("pr", "edit")]
+                if retarget_fails or "10" not in moved:
+                    return "10\n"
+                return "" if "11" in moved else "11\n"
             if args[:2] == ("pr", "edit") and retarget_fails:
                 raise pt.ToolError("base branch was modified")
             if args[:3] == ("api", "-X", "DELETE") and delete_fails:
@@ -801,6 +823,10 @@ def test_prs_stacked_on_the_merged_branch_are_moved_before_it_is_deleted(monkeyp
     assert edit < delete
     assert "retargeted #10 from fix/version-manager-sync to main" in out
     assert "deleted branch fix/version-manager-sync" in out
+    # A PR opened on the branch after the first listing is moved as well:
+    # the branch goes only after a listing that comes back empty.
+    late = calls.index(("pr", "edit", "11", "-R", "octo-user/r", "--base", "main"))
+    assert edit < late < delete
 
     # A dependent that cannot be moved keeps the branch alive.
     calls, out = run(retarget_fails=True)

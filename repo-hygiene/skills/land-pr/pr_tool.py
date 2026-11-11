@@ -375,12 +375,21 @@ VERSION_PY_FILES = {"version.py", "constants.py", "__init__.py", "main.py",
 # is titled like a release.
 CHANGELOG_PATHS = {"CHANGELOG.md", "Docs/CHANGELOG.md", "docs/CHANGELOG.md"}
 
+# Characters str.splitlines() treats as line breaks besides "\n" and "\r".
+HIDDEN_SEPARATORS = "\x0b\x0c\x1c\x1d\x1e\x85  "
+
 
 def is_changelog(path: str) -> bool:
     return path in CHANGELOG_PATHS
 
 
 def _version_line(base: str, line: str) -> bool:
+    line = line.rstrip("\r")
+    # One physical line must be one logical line: a bare carriage return or
+    # any other separator in the middle starts a new line for an interpreter
+    # (and `\s` in the patterns below would wave it through as whitespace).
+    if "\r" in line or "\n" in line or any(ch in line for ch in HIDDEN_SEPARATORS):
+        return False
     for name, pattern in VERSION_LINES:
         if name == "*.py":
             hit = base in VERSION_PY_FILES
@@ -416,9 +425,19 @@ def release_diff_is_mechanical(files: list[dict]) -> bool:
         patch = f.get("patch")
         if not patch or status != "modified":
             return False
-        # ("+", "-"), not "+-": the empty string is `in` any string, and a
-        # patch line that splits to "" would then be indexed below.
-        lines = [x for x in patch.splitlines() if x[:1] in ("+", "-")]
+        # Split on "\n" ONLY. str.splitlines() also breaks on form feed,
+        # vertical tab, the file/group/record separators, NEL and the Unicode
+        # line and paragraph separators, and every one of those is plain
+        # whitespace inside a line of Python. `__version__ = "1.0.1"\x0c;
+        # import os` would be judged as an innocent first half with the
+        # second half thrown away. A line carrying any of them is refused
+        # outright: no version declaration needs one.
+        if any(ch in patch for ch in HIDDEN_SEPARATORS):
+            return False
+        # ("+", "-"), not "+-": the empty string is `in` any string, and an
+        # empty line would then be indexed below.
+        lines = [x.rstrip("\r") for x in patch.split("\n")
+                 if x[:1] in ("+", "-")]
         minus = [x[1:] for x in lines if x[0] == "-"]
         plus = [x[1:] for x in lines if x[0] == "+"]
         if not plus or len(minus) != len(plus):
@@ -1472,6 +1491,7 @@ def cmd_land(ref: str, apply: bool = False, level: str | None = None,
         return after_merge(merged, version)
 
 
+DEPENDENT_PASSES = 4
 MERGE_POLLS = 5
 MERGE_POLL_SECONDS = 4
 RELEASE_COMMIT = re.compile(r"^chore\(release\): v(\d+\.\d+\.\d+[\w.+-]*)$")
@@ -1519,25 +1539,35 @@ def after_merge(pr: PR, version: str | None) -> int:
             # dependent to this PR's base first, and keep the branch unless
             # every one of them is known to have moved.
             keep = ""
-            try:
-                # check=True: a FAILED listing must not read as "none".
-                dependents = gh("pr", "list", "-R", pr.repo, "--state", "open",
-                                "--base", pr.head, "--limit", "1000",
-                                "--json", "number", "--jq", ".[].number").split()
-            except ToolError as exc:
-                dependents = []
-                keep = f"could not list the PRs based on it ({exc})"
-            stranded = []
-            for n in dependents:
+            # List, move, then list AGAIN: a PR opened on the branch while
+            # the first batch was being moved must be moved too. The branch
+            # goes only after a listing that comes back empty.
+            for _ in range(DEPENDENT_PASSES):
                 try:
-                    gh("pr", "edit", n, "-R", pr.repo, "--base", pr.base)
-                    print(f"  retargeted #{n} from {pr.head} to {pr.base}")
+                    # check=True: a FAILED listing must not read as "none".
+                    dependents = gh(
+                        "pr", "list", "-R", pr.repo, "--state", "open",
+                        "--base", pr.head, "--limit", "1000",
+                        "--json", "number", "--jq", ".[].number").split()
                 except ToolError as exc:
-                    stranded.append(n)
-                    print(f"  could not retarget #{n} to {pr.base}: {exc}")
-            if stranded:
-                keep = (f"#{', #'.join(stranded)} still based on it; deleting "
-                        "it would close them")
+                    keep = f"could not list the PRs based on it ({exc})"
+                    break
+                if not dependents:
+                    break
+                stranded = []
+                for n in dependents:
+                    try:
+                        gh("pr", "edit", n, "-R", pr.repo, "--base", pr.base)
+                        print(f"  retargeted #{n} from {pr.head} to {pr.base}")
+                    except ToolError as exc:
+                        stranded.append(n)
+                        print(f"  could not retarget #{n} to {pr.base}: {exc}")
+                if stranded:
+                    keep = (f"#{', #'.join(stranded)} still based on it; "
+                            "deleting it would close them")
+                    break
+            else:
+                keep = "PRs based on it keep appearing"
             # Look again right before deleting: someone may have pushed to
             # the branch while the dependents were being moved.
             if not keep and tip() != pr.head_oid:
@@ -1602,7 +1632,7 @@ def confirmed_version(pr: PR) -> tuple[str | None, str]:
         text = gh("api", f"repos/{pr.repo}/contents/{name}?ref={pr.merge_commit}",
                   "-H", "Accept: application/vnd.github.raw", check=False)
         if any(_version_line(base, line) and version in SEMVER.findall(line)
-               for line in text.splitlines()):
+               for line in text.split("\n")):     # "\n" only; see above
             return version, ""
     return None, f"no version file declares {version} at the merge commit"
 
