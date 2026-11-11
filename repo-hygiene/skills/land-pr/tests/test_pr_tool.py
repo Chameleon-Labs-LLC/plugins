@@ -650,6 +650,13 @@ def test_a_pr_too_big_to_read_in_one_page_is_refused_not_passed():
     node["pullRequest"]["reviewThreads"] = {"totalCount": 0, "nodes": []}
     node["pullRequest"]["statusCheckRollup"]["contexts"]["totalCount"] = 250
     assert pt.classify(_pr(node), NOW, ME).state == "BLOCKED"
+    # More check suites on the head than the page read: an unfinished
+    # workflow run could be hiding past it.
+    del node["pullRequest"]["statusCheckRollup"]["contexts"]["totalCount"]
+    assert pt.classify(_pr(node), NOW, ME).state == "READY"
+    node["pullRequest"]["tail"]["nodes"][-1]["commit"]["checkSuites"]["totalCount"] = 140
+    v = pt.classify(_pr(node), NOW, ME)
+    assert v.state == "BLOCKED" and "140 check suites" in v.reasons[0]
 
 
 def test_unseen_files_count_as_sensitive():
@@ -730,6 +737,45 @@ def _merged_env(monkeypatch, merged, *, release_commit=VERSION_BUMP,
     monkeypatch.setattr(pt, "gh", gh)
     monkeypatch.setattr(pt, "remote_tag_exists", lambda repo, tag: False)
     return calls
+
+
+def test_prs_stacked_on_the_merged_branch_are_moved_before_it_is_deleted(monkeypatch, capsys):
+    # plugins#9 / #10, 2026-11-11: the lander deleted #9's branch through the
+    # API and GitHub closed #10, which was based on it.
+    head_oid = "a" * 40
+    merged = make(files=CI_ONLY, state="MERGED", merge_commit="c" * 40,
+                  head="fix/version-manager-sync", head_oid=head_oid)
+
+    def run(retarget_fails):
+        _land_env(monkeypatch, [make(files=CI_ONLY, head="fix/version-manager-sync",
+                                     head_oid=head_oid), merged])
+        calls = []
+
+        def gh(*args, **kw):
+            calls.append(args)
+            if args[:2] == ("api", "repos/octo-user/r/git/ref/heads/fix/version-manager-sync"):
+                return head_oid + "\n"
+            if args[:2] == ("pr", "list") and "--base" in args:
+                return "10\n"
+            if args[:2] == ("pr", "edit") and retarget_fails:
+                raise pt.ToolError("base branch was modified")
+            return ""
+        monkeypatch.setattr(pt, "gh", gh)
+        assert pt.cmd_land("octo-user/r#7", apply=True, trusted=ME) == 0
+        return calls, capsys.readouterr().out
+
+    calls, out = run(retarget_fails=False)
+    merge = next(c for c in calls if c[:2] == ("pr", "merge"))
+    assert "--delete-branch" not in merge            # gh must not delete it either
+    edit = calls.index(("pr", "edit", "10", "-R", "octo-user/r", "--base", "main"))
+    delete = next(i for i, c in enumerate(calls) if c[:3] == ("api", "-X", "DELETE"))
+    assert edit < delete
+    assert "retargeted #10 from fix/version-manager-sync to main" in out
+
+    # A dependent that cannot be moved keeps the branch alive.
+    calls, out = run(retarget_fails=True)
+    assert not any(c[:3] == ("api", "-X", "DELETE") for c in calls)
+    assert "kept branch fix/version-manager-sync" in out and "LANDED" in out
 
 
 def test_land_on_a_merged_pr_finishes_the_tag_it_missed(monkeypatch, capsys):

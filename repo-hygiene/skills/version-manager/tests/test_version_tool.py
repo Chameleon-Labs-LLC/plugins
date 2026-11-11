@@ -376,6 +376,14 @@ def test_a_version_inside_an_xml_comment_is_neither_read_nor_rewritten(tmp_path)
     assert vt._extract_all(text, "csproj") == ["0.3.0"]    # no false disagreement
     only_commented = "<Project><!-- <Version>1.0.0</Version> --></Project>"
     assert vt._extract(only_commented, "csproj") is None
+    # CDATA is literal text too, however much it looks like markup.
+    cdata = ("<Project><Description><![CDATA[Set <Version>9.9.9</Version> in "
+             "your own project]]></Description>\n"
+             "<PropertyGroup><Version>0.3.0</Version></PropertyGroup></Project>")
+    assert vt._extract_all(cdata, "csproj") == ["0.3.0"]
+    assert vt._sub_outside_comments(
+        vt.PATTERNS["csproj"], lambda m: m.group("pre") + "0.3.1" + m.group("post"),
+        cdata) == cdata.replace("<Version>0.3.0", "<Version>0.3.1")
 
     repo = new_repo(tmp_path)
     commit(repo, "init", {

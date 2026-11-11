@@ -251,7 +251,7 @@ query($owner:String!,$name:String!,$number:Int!){
       commits(last:100){nodes{commit{oid messageHeadline committedDate
         parents(first:3){nodes{oid}}}}}
       tail:commits(last:20){nodes{commit{oid
-        checkSuites(first:50){nodes{createdAt status conclusion
+        checkSuites(first:100){totalCount nodes{createdAt status conclusion
           workflowRun{event workflow{databaseId name}}}}
         statusCheckRollup{contexts(first:100){nodes{__typename
           ... on CheckRun{name status conclusion}
@@ -656,6 +656,15 @@ def pr_from_node(repo: str, repo_node: dict,
     if seen_checks.get("totalCount", 0) > len(rollup):
         unverifiable.append(f"{seen_checks['totalCount']} checks; only the "
                             "first 100 were read")
+    # An unfinished workflow run past the page that was read is invisible to
+    # the "has every run finished" gate, so more than one page is a refusal.
+    tail_nodes = (n.get("tail") or {}).get("nodes", [])
+    head_suites = ((tail_nodes[-1].get("commit") or {}).get("checkSuites") or {}) \
+        if tail_nodes else {}
+    if head_suites.get("totalCount", 0) > len(head_suites.get("nodes", [])):
+        unverifiable.append(f"{head_suites['totalCount']} check suites on the "
+                            "head; only the first 100 were read, so not every "
+                            "workflow run is known finished")
     methods =[m for m, ok in (("squash", repo_node.get("squashMergeAllowed")),
                                ("merge", repo_node.get("mergeCommitAllowed")),
                                ("rebase", repo_node.get("rebaseMergeAllowed")))
@@ -1425,8 +1434,10 @@ def cmd_land(ref: str, apply: bool = False, level: str | None = None,
             finally:
                 ws.close()
 
+        # No --delete-branch here: the branch is deleted in after_merge, and
+        # only once any PR stacked on it has been moved off it.
         args = ["pr", "merge", str(number), "-R", repo, f"--{method}",
-                "--delete-branch", "--match-head-commit", pr.head_oid]
+                "--match-head-commit", pr.head_oid]
         if method == "squash":
             args += ["--subject", squash_subject(pr.title, number, version)]
         gh(*args)
@@ -1487,9 +1498,29 @@ def after_merge(pr: PR, version: str | None) -> int:
         tip = gh("api", f"repos/{pr.repo}/git/ref/heads/{pr.head}",
                  "--jq", ".object.sha", check=False).strip()
         if tip and tip == pr.head_oid:
-            gh("api", "-X", "DELETE",
-               f"repos/{pr.repo}/git/refs/heads/{pr.head}", check=False)
-            print(f"  deleted branch {pr.head}")
+            # GitHub retargets PRs stacked on a branch only when IT deletes
+            # the branch (the merge button). A deletion through the API
+            # CLOSES them instead (plugins#10, 2026-11-11). So move every
+            # dependent to this PR's base first, and keep the branch if any
+            # of them could not be moved.
+            dependents = gh("pr", "list", "-R", pr.repo, "--state", "open",
+                            "--base", pr.head, "--json", "number",
+                            "--jq", ".[].number", check=False).split()
+            stranded = []
+            for n in dependents:
+                try:
+                    gh("pr", "edit", n, "-R", pr.repo, "--base", pr.base)
+                    print(f"  retargeted #{n} from {pr.head} to {pr.base}")
+                except ToolError as exc:
+                    stranded.append(n)
+                    print(f"  could not retarget #{n} to {pr.base}: {exc}")
+            if stranded:
+                print(f"  kept branch {pr.head}: #{', #'.join(stranded)} "
+                      "still based on it; deleting it would close them")
+            else:
+                gh("api", "-X", "DELETE",
+                   f"repos/{pr.repo}/git/refs/heads/{pr.head}", check=False)
+                print(f"  deleted branch {pr.head}")
     leftovers = gh("pr", "list", "-R", pr.repo, "--state", "open", "--head",
                    f"autofix/pr-{pr.number}", "--json", "number",
                    "--jq", ".[].number", check=False).split()

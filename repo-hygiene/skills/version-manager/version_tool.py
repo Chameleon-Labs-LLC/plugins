@@ -353,17 +353,20 @@ def _extract(text: str, kind: str) -> str | None:
     return m.group("v") if m else None
 
 
-XML_COMMENT = re.compile(r"<!--.*?-->", re.S)
+# Text in an XML file that is not markup: a comment, or a CDATA section
+# (literal characters, whatever they look like).
+XML_DEAD_SPAN = re.compile(r"<!--.*?-->|<!\[CDATA\[.*?\]\]>", re.S)
 
 
 def _outside_comments(pattern: re.Pattern[str], text: str) -> list[re.Match[str]]:
-    """Matches of `pattern` in an XML file that are not inside a comment.
+    """Matches of `pattern` in an XML file that are real markup.
 
-    `<!-- <Version>1.0.0</Version> -->` is a note to a person, not a
+    `<!-- <Version>1.0.0</Version> -->` is a note to a person, and
+    `<![CDATA[<Version>1.0.0</Version>]]>` is literal text. Neither is a
     declaration: it must be neither read as the project's version nor
     rewritten by a release.
     """
-    dead = [m.span() for m in XML_COMMENT.finditer(text)]
+    dead = [m.span() for m in XML_DEAD_SPAN.finditer(text)]
     return [m for m in pattern.finditer(text)
             if not any(a <= m.start() < b for a, b in dead)]
 

@@ -85,7 +85,7 @@ a PR title or a file; the lander assigns it at merge.
 | `SUPERSEDED` | autofix draft whose source PR merged or closed | `sweep --apply` closes it |
 | `AUTOFIX` | autofix draft, source still open | fold into the source, or close |
 | `DRAFT` | draft PR | finish or close |
-| `STACKED` | based on another PR's branch, not the default branch | land the base PR first: GitHub retargets this one to the default branch, then `land` it. Or merge the whole stack with `gh stack merge` (skill `github-stacked-prs`) and run `land` on the top PR to tag |
+| `STACKED` | based on another PR's branch, not the default branch | land the base PR first: the lander moves this one onto the base's own base before it deletes the merged branch (GitHub does not do that for an API deletion; it closes the dependent PR). After a squash merge the moved PR usually conflicts: merge the default branch into it, then `land` it. Or merge the whole stack at once (skill `github-stacked-prs`): cut and push the untagged release commit on the top layer BEFORE `gh stack merge`, then `land <top PR> --apply` to tag. With no release commit on the top layer there is nothing for `land` to tag |
 | `EXTERNAL` | outside contributor | the user |
 | `ELSEWHERE` | your PR in someone else's repo | that repo's owner |
 | `STALE(...)` | any of the above, idle 14+ days | the user: close or revive |
