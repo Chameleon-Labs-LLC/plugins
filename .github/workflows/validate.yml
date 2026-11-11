@@ -49,3 +49,6 @@ jobs:
         run: |
           pip install pytest
           python3 -m pytest repo-hygiene/skills/version-manager/tests/ -q
+
+      - name: land-pr test suite
+        run: python3 -m pytest repo-hygiene/skills/land-pr/tests/ -q

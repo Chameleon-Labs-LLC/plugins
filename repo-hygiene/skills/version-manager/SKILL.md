@@ -45,7 +45,8 @@ python3 $T --repo /abs/path/to/repo release minor --notes /tmp/notes.md --apply 
 `--no-tag` commits the bump without tagging it. Tag the merge commit once the
 PR has merged (`git tag -a vX.Y.Z <merge-sha> -m "Version X.Y.Z"`). A tag
 pushed from a branch whose bump later goes stale points at a commit that never
-shipped, and protected `v*` tags cannot be moved. If a merge-time lander cuts
+shipped, and protected `v*` tags cannot be moved. If a merge-time lander (the
+`land-pr` skill in this plugin) cuts
 the bump for you, it runs this same command; leave the bump to it. Outside a
 PR, drop `--no-tag` and `release` tags the commit itself.
 
