@@ -252,7 +252,7 @@ query($owner:String!,$name:String!,$number:Int!){
         parents(first:3){nodes{oid}}}}}
       tail:commits(last:20){nodes{commit{oid
         checkSuites(first:50){nodes{createdAt status conclusion
-          workflowRun{event workflow{name}}}}
+          workflowRun{event workflow{databaseId name}}}}
         statusCheckRollup{contexts(first:100){nodes{__typename
           ... on CheckRun{name status conclusion}
           ... on StatusContext{context state}}}}}}}
@@ -547,19 +547,26 @@ def head_facts(n: dict, commits: list[dict],
     # created during an Actions outage could not start or be cancelled), and
     # a later run of the same workflow for the same event on the same commit
     # replaces it. At equal times the unfinished one is kept.
+    # "The same workflow" is its identity, not its display name: two workflow
+    # files may share a `name:`, and a finished run of one must never stand in
+    # for an unfinished run of the other.
     newest: dict[tuple[str, str], dict] = {}
     for s in suite_nodes:
         wf = s.get("workflowRun")
         if not wf:
             continue    # other apps leave a suite queued forever; ignore
-        key = ((wf.get("workflow") or {}).get("name") or "workflow",
+        flow = wf.get("workflow") or {}
+        name = flow.get("name") or "workflow"
+        key = (str(flow.get("databaseId") or f"name:{name}"),
                wf.get("event") or "")
         rank = (s.get("createdAt") or "", unfinished(s))
         if key not in newest or rank > (newest[key].get("createdAt") or "",
                                         unfinished(newest[key])):
             newest[key] = s
     running: list[str] = []
-    for (name, _event), s in newest.items():
+    for s in newest.values():
+        name = ((s["workflowRun"].get("workflow") or {}).get("name")
+                or "workflow")
         if unfinished(s) and name not in running:
             running.append(name)
 
@@ -1560,6 +1567,17 @@ def finish_merged(pr: PR, apply: bool, trusted: set[str],
             print(f"  already merged. A commit names v{claimed} and it is not "
                   f"tagged, but that could not be confirmed: {why}. Nothing "
                   "is tagged; if the version is right, tag it by hand.")
+            return 1
+    elif claimed and pr.merge_commit:
+        # Tagged, but is it THIS release? A run that failed because the tag
+        # sits on another commit must not be reported as finished by the
+        # next run just because "a tag of that name exists".
+        at = tag_commit(pr.repo, f"v{claimed}")
+        if at != pr.merge_commit:
+            print(f"  already merged, and v{claimed} is tagged, but at "
+                  f"{(at or 'an unreadable ref')[:9]}, not at this PR's merge "
+                  f"commit {pr.merge_commit[:9]}. Tags are protected, so "
+                  "this needs a person.")
             return 1
     if not apply:
         if untagged:

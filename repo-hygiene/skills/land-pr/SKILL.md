@@ -85,7 +85,7 @@ a PR title or a file; the lander assigns it at merge.
 | `SUPERSEDED` | autofix draft whose source PR merged or closed | `sweep --apply` closes it |
 | `AUTOFIX` | autofix draft, source still open | fold into the source, or close |
 | `DRAFT` | draft PR | finish or close |
-| `STACKED` | based on another PR's branch, not the default branch | land the PR underneath; GitHub retargets this one, then `land` |
+| `STACKED` | based on another PR's branch, not the default branch | land the base PR first: GitHub retargets this one to the default branch, then `land` it. Or merge the whole stack with `gh stack merge` (skill `github-stacked-prs`) and run `land` on the top PR to tag |
 | `EXTERNAL` | outside contributor | the user |
 | `ELSEWHERE` | your PR in someone else's repo | that repo's owner |
 | `STALE(...)` | any of the above, idle 14+ days | the user: close or revive |

@@ -217,6 +217,16 @@ def test_a_newer_run_of_the_same_workflow_replaces_a_dead_one():
     # Same instant: the unfinished one is believed.
     assert running(suite(20, "security", "COMPLETED", "SUCCESS"),
                    suite(20, "security", "QUEUED")) == ["security"]
+    # Two workflow FILES that share a display name are two workflows: a
+    # finished run of one never stands in for an unfinished run of the other.
+    def by_id(minutes_ago, wid, status, conclusion=None):
+        s = suite(minutes_ago, "ci", status, conclusion)
+        s["workflowRun"]["workflow"]["databaseId"] = wid
+        return s
+    assert running(by_id(60, 111, "QUEUED"),
+                   by_id(20, 222, "COMPLETED", "SUCCESS")) == ["ci"]
+    assert running(by_id(60, 111, "QUEUED"),
+                   by_id(20, 111, "COMPLETED", "SUCCESS")) == []
 
 
 def _node(commits, *, reviews=(), comments=(), rollup=(), tail=None):
@@ -739,10 +749,19 @@ def test_land_on_a_merged_pr_finishes_the_tag_it_missed(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "TAG FAILED" in out and "LANDED" not in out.split("TAG FAILED")[1]
 
-    # Already tagged: nothing to do.
+    # Already tagged at the merge commit: nothing to do.
     calls = _merged_env(monkeypatch, merged)
     monkeypatch.setattr(pt, "remote_tag_exists", lambda repo, tag: True)
+    monkeypatch.setattr(pt, "tag_commit", lambda repo, tag: "c" * 40)
     assert pt.cmd_land("octo-user/r#7", trusted=ME) == 0
+    assert calls == [] and "nothing to land" in capsys.readouterr().out
+    # Tagged, but on some other commit: that is not "finished". The run that
+    # hit this said TAG FAILED; the next run must not say all is well.
+    monkeypatch.setattr(pt, "tag_commit", lambda repo, tag: "d" * 40)
+    for apply in (False, True):
+        assert pt.cmd_land("octo-user/r#7", apply=apply, trusted=ME) == 1
+        out = capsys.readouterr().out
+        assert "not at this PR's merge commit" in out and "LANDED" not in out
     assert calls == []
 
 
