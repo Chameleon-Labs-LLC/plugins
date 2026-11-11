@@ -369,6 +369,17 @@ VERSION_PY_FILES = {"version.py", "constants.py", "__init__.py", "main.py",
                     "setup.py"}
 
 
+# The changelog, by exact path: the three places version_tool.py keeps it.
+# Not "any name starting with CHANGELOG": src/changelog.py and CHANGELOG.js
+# are code, and an exemption by prefix would let code ride in a commit that
+# is titled like a release.
+CHANGELOG_PATHS = {"CHANGELOG.md", "Docs/CHANGELOG.md", "docs/CHANGELOG.md"}
+
+
+def is_changelog(path: str) -> bool:
+    return path in CHANGELOG_PATHS
+
+
 def _version_line(base: str, line: str) -> bool:
     for name, pattern in VERSION_LINES:
         if name == "*.py":
@@ -396,7 +407,7 @@ def release_diff_is_mechanical(files: list[dict]) -> bool:
     for f in files:
         base = (f.get("filename") or "").rsplit("/", 1)[-1]
         status = f.get("status")
-        if base.upper().startswith("CHANGELOG"):
+        if is_changelog(f.get("filename") or ""):
             # Added or edited in place only: a product file RENAMED to
             # CHANGELOG.md is a product file leaving, not a changelog.
             if status not in ("modified", "added"):
@@ -405,7 +416,9 @@ def release_diff_is_mechanical(files: list[dict]) -> bool:
         patch = f.get("patch")
         if not patch or status != "modified":
             return False
-        lines = [x for x in patch.splitlines() if x[:1] in "+-"]
+        # ("+", "-"), not "+-": the empty string is `in` any string, and a
+        # patch line that splits to "" would then be indexed below.
+        lines = [x for x in patch.splitlines() if x[:1] in ("+", "-")]
         minus = [x[1:] for x in lines if x[0] == "-"]
         plus = [x[1:] for x in lines if x[0] == "+"]
         if not plus or len(minus) != len(plus):
@@ -1494,18 +1507,26 @@ def after_merge(pr: PR, version: str | None) -> int:
             tag_failed = True
             print(f"  TAG FAILED: merged, but v{version} is not tagged: {exc}")
     if pr.head and pr.head != pr.base and not pr.cross_repo:
+        def tip() -> str:
+            return gh("api", f"repos/{pr.repo}/git/ref/heads/{pr.head}",
+                      "--jq", ".object.sha", check=False).strip()
+
         # Only the branch as it was merged; one that has moved since is in use.
-        tip = gh("api", f"repos/{pr.repo}/git/ref/heads/{pr.head}",
-                 "--jq", ".object.sha", check=False).strip()
-        if tip and tip == pr.head_oid:
+        if tip() == pr.head_oid:
             # GitHub retargets PRs stacked on a branch only when IT deletes
             # the branch (the merge button). A deletion through the API
             # CLOSES them instead (plugins#10, 2026-11-11). So move every
-            # dependent to this PR's base first, and keep the branch if any
-            # of them could not be moved.
-            dependents = gh("pr", "list", "-R", pr.repo, "--state", "open",
-                            "--base", pr.head, "--json", "number",
-                            "--jq", ".[].number", check=False).split()
+            # dependent to this PR's base first, and keep the branch unless
+            # every one of them is known to have moved.
+            keep = ""
+            try:
+                # check=True: a FAILED listing must not read as "none".
+                dependents = gh("pr", "list", "-R", pr.repo, "--state", "open",
+                                "--base", pr.head, "--limit", "1000",
+                                "--json", "number", "--jq", ".[].number").split()
+            except ToolError as exc:
+                dependents = []
+                keep = f"could not list the PRs based on it ({exc})"
             stranded = []
             for n in dependents:
                 try:
@@ -1515,12 +1536,21 @@ def after_merge(pr: PR, version: str | None) -> int:
                     stranded.append(n)
                     print(f"  could not retarget #{n} to {pr.base}: {exc}")
             if stranded:
-                print(f"  kept branch {pr.head}: #{', #'.join(stranded)} "
-                      "still based on it; deleting it would close them")
+                keep = (f"#{', #'.join(stranded)} still based on it; deleting "
+                        "it would close them")
+            # Look again right before deleting: someone may have pushed to
+            # the branch while the dependents were being moved.
+            if not keep and tip() != pr.head_oid:
+                keep = "it has moved since the merge"
+            if keep:
+                print(f"  kept branch {pr.head}: {keep}")
             else:
-                gh("api", "-X", "DELETE",
-                   f"repos/{pr.repo}/git/refs/heads/{pr.head}", check=False)
-                print(f"  deleted branch {pr.head}")
+                try:
+                    gh("api", "-X", "DELETE",
+                       f"repos/{pr.repo}/git/refs/heads/{pr.head}")
+                    print(f"  deleted branch {pr.head}")
+                except ToolError as exc:
+                    print(f"  could not delete branch {pr.head}: {exc}")
     leftovers = gh("pr", "list", "-R", pr.repo, "--state", "open", "--head",
                    f"autofix/pr-{pr.number}", "--json", "number",
                    "--jq", ".[].number", check=False).split()
@@ -1567,7 +1597,7 @@ def confirmed_version(pr: PR) -> tuple[str | None, str]:
     for f in files:
         name = f.get("filename") or ""
         base = name.rsplit("/", 1)[-1]
-        if base.upper().startswith("CHANGELOG"):
+        if is_changelog(name):
             continue
         text = gh("api", f"repos/{pr.repo}/contents/{name}?ref={pr.merge_commit}",
                   "-H", "Accept: application/vnd.github.raw", check=False)

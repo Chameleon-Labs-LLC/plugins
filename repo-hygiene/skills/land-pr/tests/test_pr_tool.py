@@ -496,6 +496,22 @@ def test_a_release_commit_is_mechanical_only_if_its_diff_is():
     assert not pt.release_diff_is_mechanical(bump[:1] + [renamed])
     assert pt.release_diff_is_mechanical(
         bump[:1] + [f("CHANGELOG.md", "@@ -0,0 +1 @@\n+# Changelog", "added")])
+    # The changelog exemption is for the changelog, by exact path. A file
+    # that merely starts with the word is code (plugins#10 review, CWE-863).
+    for sneaky in ("src/changelog.py", "CHANGELOG.js", "scripts/Changelog.sh",
+                   "CHANGELOG.md.py", "src/CHANGELOG.md"):
+        added = f(sneaky, "@@ -0,0 +1 @@\n+anything()", "added")
+        edited = f(sneaky, "@@ -1 +1 @@\n-a()\n+b()")
+        assert not pt.release_diff_is_mechanical(bump[:1] + [added]), sneaky
+        assert not pt.release_diff_is_mechanical(bump[:1] + [edited]), sneaky
+    for real in ("CHANGELOG.md", "Docs/CHANGELOG.md", "docs/CHANGELOG.md"):
+        assert pt.release_diff_is_mechanical(
+            bump[:1] + [f(real, "@@ -1 +1,2 @@\n # Changelog\n+- note")]), real
+    # A patch line that splits to an empty string must not crash the check
+    # (and with it the whole status run): form feeds split lines too.
+    odd = f("package.json", '@@ -2 +2 @@\n-  "version": "1.4.1",\n'
+                            '+  "version": "1.4.2",\n+\x0c\x0cmore')
+    assert pt.release_diff_is_mechanical([odd]) is False
     # What the patch does not show cannot be vouched for.
     assert not pt.release_diff_is_mechanical([f("logo.png", None)])
     assert not pt.release_diff_is_mechanical([f("new.py", "@@ +1 @@\n+x", "added")])
@@ -746,36 +762,59 @@ def test_prs_stacked_on_the_merged_branch_are_moved_before_it_is_deleted(monkeyp
     merged = make(files=CI_ONLY, state="MERGED", merge_commit="c" * 40,
                   head="fix/version-manager-sync", head_oid=head_oid)
 
-    def run(retarget_fails):
+    ref = ("api", "repos/octo-user/r/git/ref/heads/fix/version-manager-sync")
+
+    def run(retarget_fails=False, list_fails=False, pushed_meanwhile=False,
+            delete_fails=False):
         _land_env(monkeypatch, [make(files=CI_ONLY, head="fix/version-manager-sync",
                                      head_oid=head_oid), merged])
         calls = []
 
         def gh(*args, **kw):
             calls.append(args)
-            if args[:2] == ("api", "repos/octo-user/r/git/ref/heads/fix/version-manager-sync"):
-                return head_oid + "\n"
+            if args[:2] == ref:
+                looked = sum(1 for c in calls if c[:2] == ref)
+                return ("b" * 40 if pushed_meanwhile and looked > 1 else head_oid) + "\n"
             if args[:2] == ("pr", "list") and "--base" in args:
+                if list_fails:
+                    raise pt.ToolError("HTTP 502")
                 return "10\n"
             if args[:2] == ("pr", "edit") and retarget_fails:
                 raise pt.ToolError("base branch was modified")
+            if args[:3] == ("api", "-X", "DELETE") and delete_fails:
+                raise pt.ToolError("HTTP 422")
             return ""
         monkeypatch.setattr(pt, "gh", gh)
         assert pt.cmd_land("octo-user/r#7", apply=True, trusted=ME) == 0
         return calls, capsys.readouterr().out
 
-    calls, out = run(retarget_fails=False)
+    def deleted(calls):
+        return any(c[:3] == ("api", "-X", "DELETE") for c in calls)
+
+    calls, out = run()
     merge = next(c for c in calls if c[:2] == ("pr", "merge"))
     assert "--delete-branch" not in merge            # gh must not delete it either
+    listing = next(c for c in calls if c[:2] == ("pr", "list") and "--base" in c)
+    assert listing[listing.index("--limit") + 1] == "1000"   # not gh's default 30
     edit = calls.index(("pr", "edit", "10", "-R", "octo-user/r", "--base", "main"))
     delete = next(i for i, c in enumerate(calls) if c[:3] == ("api", "-X", "DELETE"))
     assert edit < delete
     assert "retargeted #10 from fix/version-manager-sync to main" in out
+    assert "deleted branch fix/version-manager-sync" in out
 
     # A dependent that cannot be moved keeps the branch alive.
     calls, out = run(retarget_fails=True)
-    assert not any(c[:3] == ("api", "-X", "DELETE") for c in calls)
+    assert not deleted(calls)
     assert "kept branch fix/version-manager-sync" in out and "LANDED" in out
+    # A FAILED listing is not "no dependents": the branch stays.
+    calls, out = run(list_fails=True)
+    assert not deleted(calls) and "could not list the PRs based on it" in out
+    # Someone pushed to the branch while dependents were being moved.
+    calls, out = run(pushed_meanwhile=True)
+    assert not deleted(calls) and "it has moved since the merge" in out
+    # A delete GitHub refuses is reported as such, never as "deleted".
+    calls, out = run(delete_fails=True)
+    assert "could not delete branch" in out and "deleted branch" not in out
 
 
 def test_land_on_a_merged_pr_finishes_the_tag_it_missed(monkeypatch, capsys):
