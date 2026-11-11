@@ -127,11 +127,19 @@ below.
   failing in it. So a head is never READY in its first 3 minutes, while a
   workflow run GitHub has created for it is unfinished, or while a reviewer
   check that ran on an earlier commit has not reported on it. A review counts
-  only if it names the head commit: the bot's review of that commit, or a
-  reviewer check that finished on it. A bot comment is not evidence (it has
-  no commit, and may be the bot finishing the commit before). It is safe to
-  run `land --apply` straight after pushing a fix; it waits.
-- **Once a reviewer has acted on a PR, the head needs its review.** Its
+  only if it names the head commit: the bot's written review of that commit
+  (one with a body), or a reviewer check that PASSED on it. Three things
+  look like evidence and are not: a bot comment (it has no commit); a
+  "review" with an empty body (GitHub files every reply in a review thread
+  as one, on the head); and a skipped or neutral reviewer check, which is
+  the reviewer saying it did NOT review that commit (CodeRabbit reports
+  "Review paused" that way: re-trigger it with `@coderabbitai review`). It
+  is safe to run `land --apply` straight after pushing a fix; it waits.
+- **A reviewer that skips the whole PR is not owed a review.** CodeRabbit on
+  a Dependabot PR reports "Review skipped: author ignored by configuration"
+  on every commit; that PR lands on its checks. The rule below applies only
+  once a reviewer has really reviewed something on the PR.
+- **Once a reviewer has reviewed a PR, the head needs its review.** Its
   silence on a new head is WAITING for 30 minutes, then `FAILING`, never
   READY: re-trigger it (GrepTile does not re-review a push). The 15-minute
   grace applies only where no reviewer has ever acted. This holds for bot

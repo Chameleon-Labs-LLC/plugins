@@ -261,7 +261,7 @@ query($owner:String!,$name:String!,$number:Int!){
         ... on StatusContext{context state}}}}
       reviewThreads(first:100){totalCount nodes{id isResolved isOutdated path line
         comments(first:1){nodes{author{login} body url}}}}
-      reviews(last:50){totalCount nodes{author{login} commit{oid}}}
+      reviews(last:50){totalCount nodes{author{login} commit{oid} body}}
     }}}
 """
 
@@ -500,13 +500,15 @@ def head_facts(n: dict, commits: list[dict],
                   reviewer checks: other apps' checks can be conditional on
                   the paths a commit touches (Dependabot's config check).
     reviewed      an automated review covers the head: a reviewer bot's
-                  review OF THAT COMMIT, or a reviewer check that finished on
-                  it. Comments are not evidence: a comment has no commit, and
-                  one posted after a push may be the bot finishing its review
-                  of the commit before.
-    active        a reviewer has acted on this PR at all (a bot review, or a
-                  reviewer check on any recent commit). Once one has, the
-                  head needs its review; waiting it out is not an option.
+                  review OF THAT COMMIT with a body, or a reviewer check that
+                  PASSED on it. Not evidence: a comment (it has no commit), a
+                  body-less "review" (a thread reply), a skipped or neutral
+                  reviewer check (the reviewer declined or paused).
+    active        a reviewer has actually reviewed something on this PR (a
+                  written review, or a reviewer check that passed on a
+                  recent commit). Once one has, the head needs its review;
+                  waiting it out is not an option. A reviewer that only ever
+                  skipped the PR is not active.
     review_clock  when the wait for a review starts.
 
     The lander's own commits (release bump, clean merge of the base) carry no
@@ -573,21 +575,32 @@ def head_facts(n: dict, commits: list[dict],
 
     reviews = n.get("reviews") or {}
     bot_reviews = [r for r in reviews.get("nodes", []) if bot(r)]
+    # A review is one the bot WROTE: it has a body ("Actionable comments
+    # posted: N", a summary). GitHub also files every reply in a review
+    # thread as a "review" of the head with an empty body, so a bot answering
+    # threads leaves a row of those on a commit it never reviewed.
+    written = [r for r in bot_reviews if (r.get("body") or "").strip()]
     by_review = any((r.get("commit") or {}).get("oid") in covered
-                    for r in bot_reviews)
-    # "skip" counts: the reviewer looked at this commit and chose not to
-    # review it (its own rules), which is its answer for the commit.
-    done = ("pass", "skip")
-    by_check = any(is_reviewer_check(name) and b in done
+                    for r in written)
+    # Only a reviewer check that PASSED is a review. A skipped or neutral
+    # one is the reviewer saying it did not review this commit (CodeRabbit
+    # reports "Review paused" that way): the opposite of evidence.
+    by_check = any(is_reviewer_check(name) and b == "pass"
                    for name, b in head_checks) or any(
-        is_reviewer_check(name) and b in done
+        is_reviewer_check(name) and b == "pass"
         for c in tail if c.get("oid") in covered for name, b in buckets(c))
     reviewed = by_review or by_check
 
-    seen_checks = [name for c in tail for name, _ in buckets(c)
-                   if is_reviewer_check(name)]
-    active = bool(bot_reviews or seen_checks
-                  or any(is_reviewer_check(name) for name, _ in head_checks)
+    # "Active" means a reviewer has actually REVIEWED something on this PR: a
+    # written review of any commit, or a reviewer check that passed on one.
+    # A check that only ever skipped does not count: that is the reviewer
+    # declining the whole PR (CodeRabbit on a bot's PR reports "Review
+    # skipped: author ignored by configuration"), which is "no reviewer
+    # here", not "the reviewer owes a review".
+    passed = any(is_reviewer_check(name) and b == "pass"
+                 for c in tail for name, b in buckets(c)) or any(
+        is_reviewer_check(name) and b == "pass" for name, b in head_checks)
+    active = bool(written or passed
                   # More reviews than were read: assume one was a reviewer's.
                   or reviews.get("totalCount", 0) > len(reviews.get("nodes", [])))
 

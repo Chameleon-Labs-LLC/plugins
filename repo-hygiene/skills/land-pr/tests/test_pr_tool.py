@@ -250,8 +250,12 @@ def _node(commits, *, reviews=(), comments=(), rollup=(), tail=None):
         "updatedAt": NOW.isoformat(), "createdAt": NOW.isoformat(),
         "commits": {"nodes": cs}, "tail": {"nodes": tl},
         "statusCheckRollup": {"contexts": {"nodes": [run(n) for n in rollup]}},
-        "reviews": {"nodes": [{"author": {"login": a}, "commit": {"oid": o}}
-                              for a, o in reviews]},
+        # (author, commit) is a written review; a third item sets its body
+        # ("" is what GitHub files for a reply in a review thread).
+        "reviews": {"nodes": [{"author": {"login": r[0]}, "commit": {"oid": r[1]},
+                               "body": r[2] if len(r) > 2
+                               else "Actionable comments posted: 0"}
+                              for r in reviews]},
         "comments": {"nodes": [{"author": {"login": a},
                                 "createdAt": w.isoformat()}
                                for a, w in comments]},
@@ -328,6 +332,69 @@ def test_review_evidence_must_name_the_head_commit():
         == [True, True, False, False]
     assert [p.reviewer_active for p in (by_review, by_check, by_comment, earlier)] \
         == [True, True, False, True]
+
+
+def test_a_paused_reviewer_has_not_reviewed_the_head():
+    # .claude_code#13, 2026-11-11: CodeRabbit auto-paused ("Latest commit, not
+    # reviewed: dfb9542"). Its check on the head concluded SKIPPED, and its
+    # replies in answered threads were filed by GitHub as body-less
+    # "reviews" of that very commit. `land` called the head READY.
+    t0, t1 = NOW - timedelta(hours=3), NOW - timedelta(hours=2)
+    commits = [("a1", "fix: thing", t0), ("b2", "fix: address review", t1)]
+    node = _node(commits,
+                 reviews=[("coderabbitai", "a1"),             # the real review
+                          ("octo-user", "b2", ""),              # author's replies
+                          ("coderabbitai", "b2", ""),         # the bot's replies
+                          ("coderabbitai", "b2", "  \n")],
+                 rollup=["ci"],
+                 tail=[("a1", t0, ["ci", "CodeRabbit"]), ("b2", t1, ["ci"])])
+    skipped = {"__typename": "CheckRun", "name": "CodeRabbit",
+               "status": "COMPLETED", "conclusion": "SKIPPED"}
+    node["pullRequest"]["statusCheckRollup"]["contexts"]["nodes"].append(skipped)
+    node["pullRequest"]["tail"]["nodes"][-1]["commit"]["statusCheckRollup"][
+        "contexts"]["nodes"].append(skipped)
+    pr = _pr(node)
+    assert pr.reviewed_head is False and pr.reviewer_active is True
+    v = pt.classify(pr, NOW, ME)
+    assert v.state == "FAILING" and "re-trigger" in v.reasons[0]
+    # A neutral conclusion is no better.
+    skipped["conclusion"] = "NEUTRAL"
+    assert _pr(node).reviewed_head is False
+    # Once the reviewer really reviews that commit, it is covered.
+    node["pullRequest"]["reviews"]["nodes"].append(
+        {"author": {"login": "coderabbitai"}, "commit": {"oid": "b2"},
+         "body": "**Actionable comments posted: 0**"})
+    assert _pr(node).reviewed_head is True
+    node["pullRequest"]["reviews"]["nodes"].pop()
+    skipped["conclusion"] = "SUCCESS"
+    assert _pr(node).reviewed_head is True
+
+
+def test_a_reviewer_that_skips_the_whole_pr_is_not_owed_a_review():
+    # A Dependabot PR: CodeRabbit reports "Review skipped: author ignored by
+    # configuration" on every commit and never writes a review. That is "no
+    # reviewer on this PR", so the bot's PR lands on its checks (the standing
+    # rule: never wait for CodeRabbit on a bot PR).
+    t0 = NOW - timedelta(hours=1)
+    node = _node([("a1", "Bump the minor-and-patch group", t0)], rollup=["ci"],
+                 tail=[("a1", t0, ["ci"])])
+    node["pullRequest"]["author"] = {"login": "dependabot", "__typename": "Bot"}
+    skipped = {"__typename": "CheckRun", "name": "CodeRabbit",
+               "status": "COMPLETED", "conclusion": "SKIPPED"}
+    for where in (node["pullRequest"]["statusCheckRollup"],
+                  node["pullRequest"]["tail"]["nodes"][-1]["commit"]["statusCheckRollup"]):
+        where["contexts"]["nodes"].append(skipped)
+    pr = _pr(node)
+    assert (pr.reviewed_head, pr.reviewer_active) == (False, False)
+    assert pt.classify(pr, NOW, {"octo-user"}).state == "READY"
+    # A person's PR that the reviewer skips throughout gets the ordinary
+    # "no reviewer here" grace, then lands too.
+    node["pullRequest"]["author"] = {"login": "octo-user", "__typename": "User"}
+    assert pt.classify(_pr(node), NOW, ME).state == "READY"
+    fresh = NOW - timedelta(minutes=8)
+    node = _node([("a1", "fix: thing", fresh)], rollup=["ci"],
+                 tail=[("a1", fresh, ["ci"])])
+    assert pt.classify(_pr(node), NOW, ME).state == "WAITING"
 
 
 def test_an_active_reviewer_silent_on_the_head_never_times_out_to_ready():
