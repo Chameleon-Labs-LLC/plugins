@@ -175,12 +175,25 @@ def _json_value(s: str, i: int) -> int:
     return i
 
 
+class DuplicateKey(ValueError):
+    """One JSON object names the same key twice. Readers keep the LAST value,
+    so no single span is "the" value: writing the first would change a value
+    nothing reads, and a release would tag a version the file does not
+    declare."""
+
+
+# Prefix of a detect() note that makes backfill and release refuse.
+BLOCKING = "BLOCKING: "
+
+
 def _json_member(s: str, obj: int, key: str) -> tuple[int, int] | None:
     """(start, end) of `key`'s value in the object opening at s[obj] == '{'.
 
     Only the object's own keys are considered; nested objects are skipped
-    whole, so a key of the same name deeper down never matches.
+    whole, so a key of the same name deeper down never matches. The whole
+    object is read: a key that appears twice raises DuplicateKey.
     """
+    found: tuple[int, int] | None = None
     i = _json_ws(s, obj + 1)
     while s[i] != "}":
         if s[i] != '"':
@@ -193,35 +206,61 @@ def _json_member(s: str, obj: int, key: str) -> tuple[int, int] | None:
         start = _json_ws(s, i + 1)
         stop = _json_value(s, start)
         if name == key:
-            return start, stop
+            if found is not None:
+                raise DuplicateKey(key)
+            found = (start, stop)
         i = _json_ws(s, stop)
         if s[i] == ",":
             i = _json_ws(s, i + 1)
-    return None
+    return found
+
+
+def _owned_span(text: str, kind: str) -> tuple[int, int] | None:
+    """_version_span without the safety net: malformed JSON raises ValueError
+    or IndexError, a repeated key on the path raises DuplicateKey."""
+    obj = _json_ws(text, 1 if text.startswith("﻿") else 0)
+    if text[obj] != "{":
+        return None
+    if kind == "marketplace":
+        plugins = _json_member(text, obj, "plugins")
+        if plugins is None or text[plugins[0]] != "[":
+            return None
+        obj = _json_ws(text, plugins[0] + 1)
+        if text[obj] != "{":
+            return None
+    span = _json_member(text, obj, "version")
+    if span is None or text[span[0]] != '"':
+        return None
+    start, end = span[0] + 1, span[1] - 1
+    if not re.fullmatch(r"\d+\.\d+\.\d+", text[start:end]):
+        return None
+    return start, end
 
 
 def _version_span(text: str, kind: str) -> tuple[int, int] | None:
-    """Span of the X.Y.Z digits of the one version key a SPAN_KINDS file owns."""
+    """Span of the X.Y.Z digits of the one version key a SPAN_KINDS file owns.
+    None when there is no such single key, a repeated one included."""
     try:
-        obj = _json_ws(text, 1 if text.startswith("﻿") else 0)
-        if text[obj] != "{":
-            return None
-        if kind == "marketplace":
-            plugins = _json_member(text, obj, "plugins")
-            if plugins is None or text[plugins[0]] != "[":
-                return None
-            obj = _json_ws(text, plugins[0] + 1)
-            if text[obj] != "{":
-                return None
-        span = _json_member(text, obj, "version")
-        if span is None or text[span[0]] != '"':
-            return None
-        start, end = span[0] + 1, span[1] - 1
-        if not re.fullmatch(r"\d+\.\d+\.\d+", text[start:end]):
-            return None
-        return start, end
+        return _owned_span(text, kind)
     except (ValueError, IndexError):
         return None
+
+
+def _duplicate_key(text: str, kind: str) -> str | None:
+    """The key a SPAN_KINDS file repeats on the way to its version, if any."""
+    try:
+        _owned_span(text, kind)
+    except DuplicateKey as exc:
+        return str(exc)
+    except (ValueError, IndexError):
+        return None
+    return None
+
+
+def _duplicate_note(rel: Path, key: str) -> str:
+    return (f"{BLOCKING}{rel}: \"{key}\" appears twice in one JSON object. "
+            "Readers use the last, so no version can be written safely. "
+            "Remove the duplicate.")
 
 # Some projects' own files name their canonical source; reading it beats
 # guessing. Two phrasings occur in that repo alone, so match both:
@@ -407,6 +446,10 @@ def detect(repo: Path) -> tuple[Location | None, list[Location], list[str]]:
                 notes.append(f"{rel}: {len(plugins)} plugins — per-plugin "
                              "versions, no single repo version; skipped")
                 continue
+            repeated = _duplicate_key(text, kind)
+            if repeated:
+                notes.append(_duplicate_note(rel, repeated))
+                continue
             declared = str(plugins[0].get("version") or "") \
                 if isinstance(plugins[0], dict) else ""
             if parse_version(declared) is None or \
@@ -436,7 +479,11 @@ def detect(repo: Path) -> tuple[Location | None, list[Location], list[str]]:
             # The plugin's own manifest mirrors the marketplace entry. A
             # manifest with no version key is fine: the entry is then the
             # only home.
-            own = _extract(_read(repo, manifest) or "", "plugin_json")
+            manifest_text = _read(repo, manifest) or ""
+            repeated = _duplicate_key(manifest_text, "plugin_json")
+            if repeated:
+                notes.append(_duplicate_note(manifest, repeated))
+            own = _extract(manifest_text, "plugin_json")
             if own is not None:
                 found.append(Location(manifest, "plugin_json", own))
 
@@ -961,9 +1008,15 @@ def cmd_backfill(repo: Path, apply: bool = False, fix_dates: bool = False,
     canonical, mirrors, notes = detect(repo)
     for n in notes:
         print(f"  note: {n}")
+    if apply and any(n.startswith(BLOCKING) for n in notes):
+        # Otherwise a skipped manifest reads as "no version location" and
+        # backfill would create a second home for the version beside it.
+        print("  REFUSED: a version file cannot be written safely; fix the "
+              "BLOCKING note above, then re-run.")
+        return 1
 
     rec = reconcile(repo, canonical)
-    git_entries = [e for e in rec.entries.values() if "git" in e.sources]
+    git_entries =[e for e in rec.entries.values() if "git" in e.sources]
     plan: list[str] = []
 
     # Step 0 — placeholder repos get a synthesized ledger (§6)
@@ -1057,6 +1110,10 @@ def cmd_release(repo: Path, level: str, apply: bool = False,
     canonical, mirrors, det_notes = detect(repo)
     for n in det_notes:
         print(f"  note: {n}")
+    if any(n.startswith(BLOCKING) for n in det_notes):
+        print("  REFUSED: a version file cannot be written safely; fix the "
+              "BLOCKING note above, then re-run.")
+        return 1
     if canonical is None:
         print("  REFUSED: no version location — run backfill first")
         return 1

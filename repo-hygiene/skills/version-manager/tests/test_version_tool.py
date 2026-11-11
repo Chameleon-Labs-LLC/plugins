@@ -232,6 +232,43 @@ def test_version_span_reads_only_the_owned_key():
     assert vt._version_span("not json", "marketplace") is None
 
 
+def test_a_repeated_version_key_blocks_release_instead_of_being_skipped(tmp_path, capsys):
+    """plugins#9 review: with two "version" keys in the plugin entry the tool
+    wrote the first while every JSON reader uses the last, so a release could
+    tag a version the manifest does not declare."""
+    twice = MARKETPLACE.replace('"version": "0.3.0"',
+                                '"version": "0.3.0",\n      "version": "0.3.0"', 1)
+    assert json.loads(twice)["plugins"][0]["version"] == "0.3.0"   # valid to a reader
+    assert vt._version_span(twice, "marketplace") is None
+    assert vt._duplicate_key(twice, "marketplace") == "version"
+    assert vt._duplicate_key(MARKETPLACE, "marketplace") is None
+    assert vt._duplicate_key("not json", "marketplace") is None
+
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {
+        ".claude-plugin/marketplace.json": twice,
+        "CHANGELOG.md": CHANGELOG.format(v="0.3.0", d="2026-08-01"),
+    }, when="2026-08-01T10:00:00")
+    commit(repo, "fix: thing", when="2026-08-06T10:00:00")
+    before = (repo / ".claude-plugin/marketplace.json").read_text()
+
+    assert vt.main(["--repo", str(repo), "check"]) == 0            # reports, never writes
+    assert "BLOCKING: " in capsys.readouterr().out
+    for verb in (["release", "patch", "--apply"], ["backfill", "--apply"]):
+        assert vt.main(["--repo", str(repo), *verb]) == 1, verb
+        assert "REFUSED: a version file cannot be written safely" in capsys.readouterr().out
+    assert (repo / ".claude-plugin/marketplace.json").read_text() == before
+    assert not (repo / "VERSION").exists()        # no second home was created
+    assert vt.git(repo, "tag", "--list").strip() == ""
+
+    # The plugin's own manifest is held to the same rule.
+    manifest = '{"name": "p", "version": "0.3.0", "version": "0.3.0"}'
+    assert vt._duplicate_key(manifest, "plugin_json") == "version"
+    # A key of the same name in a NESTED object is not a repeat.
+    nested = '{"author": {"version": "5.5.5"}, "name": "p", "version": "1.2.3"}'
+    assert vt._duplicate_key(nested, "plugin_json") is None
+
+
 PLUGIN_JSON = """{
   "name": "example-plugin",
   "description": "the plugin's own manifest",
