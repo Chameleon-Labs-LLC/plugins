@@ -269,6 +269,102 @@ def test_a_repeated_version_key_blocks_release_instead_of_being_skipped(tmp_path
     assert vt._duplicate_key(nested, "plugin_json") is None
 
 
+def _symlink(link: Path, target: Path, is_dir: bool) -> bool:
+    try:
+        os.symlink(target, link, target_is_directory=is_dir)
+        return True
+    except (OSError, NotImplementedError):
+        return False        # Windows without the privilege
+
+
+def test_a_version_is_never_written_outside_the_repository(tmp_path, capsys):
+    """plugins#9 review (CWE-61): a marketplace `source` that is a symlink
+    out of the repo passed the relative-path checks, and a release rewrote
+    the plugin.json it reached."""
+    outside = tmp_path / "someone-elses-plugin"
+    (outside / ".claude-plugin").mkdir(parents=True)
+    theirs = outside / ".claude-plugin" / "plugin.json"
+    theirs.write_text(PLUGIN_JSON % "0.3.0", encoding="utf-8")
+
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {
+        ".claude-plugin/marketplace.json":
+            MARKETPLACE.replace('"source": "./"', '"source": "./linked"'),
+        "CHANGELOG.md": CHANGELOG.format(v="0.3.0", d="2026-08-01"),
+    }, when="2026-08-01T10:00:00")
+
+    # The write guard needs no symlink to test: a location that resolves
+    # outside the repo is refused whatever led to it.
+    escape = vt.Location(Path("..") / outside.name / ".claude-plugin" / "plugin.json",
+                         "plugin_json", "0.3.0")
+    assert vt._inside(repo, Path("CHANGELOG.md"))
+    assert not vt._inside(repo, escape.path)
+    with pytest.raises(vt.GitError, match="outside the repository"):
+        vt.write_version(repo, escape, "9.9.9")
+    assert theirs.read_text(encoding="utf-8") == PLUGIN_JSON % "0.3.0"
+
+    if not _symlink(repo / "linked", outside, is_dir=True):
+        pytest.skip("cannot create symlinks here; the guard itself is tested above")
+    vt.git(repo, "add", "-A")
+    vt.git(repo, "commit", "-q", "-m", "chore: link the plugin source")
+    assert vt._plugin_manifest_for(repo, {"source": "./linked"}) is None
+    _canonical, mirrors, _notes = vt.detect(repo)
+    assert all(m.kind != "plugin_json" for m in mirrors)
+    assert vt.main(["--repo", str(repo), "release", "patch", "--apply"]) == 0
+    assert theirs.read_text(encoding="utf-8") == PLUGIN_JSON % "0.3.0"
+
+
+def test_a_version_file_linked_out_of_the_repo_blocks_release(tmp_path, capsys):
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "VERSION").write_text("1.2.3\n", encoding="utf-8")
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {"README.md": "x\n"})
+    if not _symlink(repo / "VERSION", outside / "VERSION", is_dir=False):
+        pytest.skip("cannot create symlinks here")
+    vt.git(repo, "add", "-A")
+    vt.git(repo, "commit", "-q", "-m", "chore: link VERSION")
+    assert vt.main(["--repo", str(repo), "release", "patch", "--apply"]) == 1
+    assert "BLOCKING: " in capsys.readouterr().out
+    assert (outside / "VERSION").read_text(encoding="utf-8") == "1.2.3\n"
+
+
+CSPROJ_SPLIT = """<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Version>
+      %s
+    </Version>
+  </PropertyGroup>
+</Project>
+"""
+
+
+def test_ledger_reads_a_csproj_version_split_across_lines(tmp_path):
+    """plugins#9 review: detect() accepts <Version> split across lines, but
+    the history ledger matched one diff line at a time and saw none of them,
+    so backfill could call a real release history a placeholder."""
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {"App.csproj": CSPROJ_SPLIT % "0.2.0"},
+           when="2026-08-01T10:00:00")
+    commit(repo, "release 0.3.0", {"App.csproj": CSPROJ_SPLIT % "0.3.0"},
+           when="2026-08-05T10:00:00")
+    commit(repo, "release 0.4.0", {"App.csproj": CSPROJ_SPLIT % "0.4.0"},
+           when="2026-08-09T10:00:00")
+    canonical, _mirrors, _notes = vt.detect(repo)
+    assert canonical is not None and canonical.value == "0.4.0"
+    assert [e.version for e in vt.git_ledger(repo, canonical)] \
+        == ["0.2.0", "0.3.0", "0.4.0"]
+
+
+def test_marketplace_of_the_wrong_shape_is_skipped_not_crashed_on(tmp_path):
+    repo = new_repo(tmp_path)
+    for body in ('[]', '"just a string"', '{"plugins": {"a": 1}}',
+                 '{"plugins": "nope"}', '{"plugins": [{"version": "1.0.0"}], '
+                 '"metadata": "not an object"}'):
+        commit(repo, "shape", {".claude-plugin/marketplace.json": body})
+        vt.detect(repo)                       # must not raise
+
+
 PLUGIN_JSON = """{
   "name": "example-plugin",
   "description": "the plugin's own manifest",
