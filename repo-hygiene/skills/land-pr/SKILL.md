@@ -85,6 +85,7 @@ a PR title or a file; the lander assigns it at merge.
 | `SUPERSEDED` | autofix draft whose source PR merged or closed | `sweep --apply` closes it |
 | `AUTOFIX` | autofix draft, source still open | fold into the source, or close |
 | `DRAFT` | draft PR | finish or close |
+| `STACKED` | based on another PR's branch, not the default branch | land the PR underneath; GitHub retargets this one, then `land` |
 | `EXTERNAL` | outside contributor | the user |
 | `ELSEWHERE` | your PR in someone else's repo | that repo's owner |
 | `STALE(...)` | any of the above, idle 14+ days | the user: close or revive |
@@ -133,11 +134,25 @@ below.
 - **Once a reviewer has acted on a PR, the head needs its review.** Its
   silence on a new head is WAITING for 30 minutes, then `FAILING`, never
   READY: re-trigger it (GrepTile does not re-review a push). The 15-minute
-  grace applies only where no reviewer has ever acted. If the reviewer is
-  gone for good, `land <ref> --apply --accept-missing-review` says so for
-  that one PR; `sweep` never implies it.
+  grace applies only where no reviewer has ever acted. This holds for bot
+  authors too: a Dependabot PR skips only the wait for a reviewer that has
+  never shown up. If the reviewer is gone for good,
+  `land <ref> --apply --accept-missing-review` says so for that one PR;
+  `sweep` never implies it.
 - **A workflow run that exists and has not finished always blocks,** WAITING
-  then `FAILING` after 30 minutes. No flag skips it: re-run or cancel it.
+  then `FAILING` after 30 minutes. No flag skips it: re-run it. Only the
+  newest run of each workflow per event counts, so re-firing the event (close
+  and reopen the PR) replaces a run that is stuck for good.
+- **A check that is still pending is WAITING for six hours,** then `FAILING`
+  as stuck. Six hours is GitHub's limit for a hosted job; the 30-minute rule
+  is for a workflow or reviewer that never started, not for one that is
+  running.
+- **A head with no check suite yet has an unknown push time,** which counts
+  as "just pushed" (the PR's last update), never as old as the commit.
+- **Findings written in a review's body are invisible to the tool.**
+  CodeRabbit puts comments on lines outside the diff there, not in threads,
+  and a body has no "resolved" state to read. Read the review itself before
+  landing; the tool can only tell you a review of the head exists.
 - **The record for a sensitive PR is a line of its own:**
   `Adversarial review: <result and where it ran>`. The word alone, an empty
   result, or `none` / `not run` / `pending` does not count.

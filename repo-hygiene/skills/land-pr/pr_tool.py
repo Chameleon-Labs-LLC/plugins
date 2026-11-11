@@ -66,6 +66,10 @@ REVIEW_GRACE_MIN = 15
 # list looks exactly like a green one.
 SETTLE_MIN = 3
 
+# A check still pending this long after the push is stuck, not slow: GitHub's
+# own limit for a hosted job is six hours. It becomes FAILING (re-run it).
+STALLED_CHECK_MIN = 360
+
 # Two things must be in on the head before it can be READY: every workflow
 # run GitHub has created for it has finished, and every reviewer check that
 # ran on an earlier commit of the PR has reported on it. Until this long
@@ -110,9 +114,12 @@ SENSITIVE = [
 SENSITIVE_EVIDENCE = re.compile(
     r"^[ \t>*-]*\**Adversarial(?:[ \t]+\w+)?[ \t]+review\**[ \t]*:"
     r"[ \t]*\**[ \t]*(\S.*)$", re.I | re.M)
-EVIDENCE_NEGATION = re.compile(     # "no findings" is a result; "no" is not
-    r"^(none\b|no$|no (review|adversarial)|not\b|n/?a\b|skipped|pending|todo"
-    r"|tbd|to do|later)", re.I)
+EVIDENCE_NEGATION = re.compile(
+    # "no findings" is a result. "no", "No.", "no, not run" are not: any "no"
+    # that is not directly followed by what was looked for is a negative.
+    r"^(none\b"
+    r"|no\b(?!\s+(?:findings?|issues?|problems?|defects?|bugs?|concerns?)\b)"
+    r"|not\b|n/?a\b|skipped|pending|todo|tbd|to do|later)", re.I)
 EVIDENCE_FORMAT = "Adversarial review: <result and where it ran>"
 
 
@@ -233,6 +240,7 @@ PR_QUERY = """
 query($owner:String!,$name:String!,$number:Int!){
   repository(owner:$owner,name:$name){
     squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed
+    defaultBranchRef{name}
     pullRequest(number:$number){
       number title body state isDraft url createdAt updatedAt
       isCrossRepository mergeable mergeStateStatus
@@ -244,7 +252,7 @@ query($owner:String!,$name:String!,$number:Int!){
         parents(first:3){nodes{oid}}}}}
       tail:commits(last:20){nodes{commit{oid
         checkSuites(first:50){nodes{createdAt status conclusion
-          workflowRun{workflow{name}}}}
+          workflowRun{event workflow{name}}}}
         statusCheckRollup{contexts(first:100){nodes{__typename
           ... on CheckRun{name status conclusion}
           ... on StatusContext{context state}}}}}}}
@@ -282,6 +290,7 @@ class PR:
     files: list[str] = field(default_factory=list)
     files_total: int = 0
     subjects: list[str] = field(default_factory=list)
+    commit_oids: list[str] = field(default_factory=list)   # parallel to subjects
     checks: list[tuple[str, str]] = field(default_factory=list)  # (name, bucket)
     threads: list[dict] = field(default_factory=list)            # unresolved
     # Everything below is about the CURRENT head, never the PR as a whole: a
@@ -296,6 +305,7 @@ class PR:
     merge_commit: str | None = None
     methods: list[str] = field(default_factory=lambda: ["squash", "merge"])
     autofix_source_state: str | None = None
+    default_branch: str = ""               # '' when not known
 
     def __post_init__(self) -> None:
         if self.head_pushed is None:
@@ -339,35 +349,73 @@ def is_reviewer_check(name: str) -> bool:
 
 SEMVER = re.compile(r"\d+\.\d+\.\d+(?:\.\d+)?")
 
+# The project's OWN version declaration, as a whole line, per file. These
+# mirror what version_tool.py writes and nothing wider: "a line with the word
+# version in it" also describes a dependency called compare-versions, and a
+# lockfile is nothing but "version" lines for other people's packages.
+_V = r"\d+\.\d+\.\d+"
+VERSION_LINES: list[tuple[str, re.Pattern[str]]] = [
+    ("package.json", re.compile(rf'^\s*"version"\s*:\s*"{_V}"\s*,?\s*$')),
+    ("marketplace.json", re.compile(rf'^\s*"version"\s*:\s*"{_V}"\s*,?\s*$')),
+    ("plugin.json", re.compile(rf'^\s*"version"\s*:\s*"{_V}"\s*,?\s*$')),
+    ("pyproject.toml", re.compile(rf'^version\s*=\s*["\']{_V}["\']\s*$')),
+    ("*.py", re.compile(rf'^(?:__version__|VERSION)\s*=\s*["\']{_V}["\']\s*$')),
+    ("VERSION", re.compile(rf"^\s*{_V}\s*$")),
+    ("README.md", re.compile(rf"^.*\*\*Version\s+{_V}\*\*.*$")),
+    ("*.csproj", re.compile(
+        rf"^\s*<(Version|AssemblyVersion|FileVersion)>\s*{_V}(?:\.\d+)?\s*</\1>\s*$")),
+]
+VERSION_PY_FILES = {"version.py", "constants.py", "__init__.py", "main.py",
+                    "setup.py"}
+
+
+def _version_line(base: str, line: str) -> bool:
+    for name, pattern in VERSION_LINES:
+        if name == "*.py":
+            hit = base in VERSION_PY_FILES
+        else:
+            hit = fnmatchcase(base, name)
+        if hit and pattern.match(line.rstrip("\r")):
+            return True
+    return False
+
 
 def release_diff_is_mechanical(files: list[dict]) -> bool:
     """True when a commit changes nothing but version numbers and a changelog.
 
     `files` is the GitHub commit API's list. A commit titled like a release
-    can hold anything, so the title is never trusted: outside the changelog,
-    every removed line must come back as the same line with only its version
-    number changed, on a line that is about a version. Anything the patch
-    does not show (binary, too large, renamed, added) fails.
+    can hold anything, so the title is never trusted. A changelog may be
+    added or edited freely. Everywhere else, the file must be one that holds
+    the project's version, and every removed line must come back as the same
+    line with only its version number changed, where that line is the
+    project's own version declaration (VERSION_LINES). Anything the patch
+    does not show (binary, too large, renamed, copied, added) fails.
     """
     if not files or len(files) > 20:
         return False
     for f in files:
         base = (f.get("filename") or "").rsplit("/", 1)[-1]
+        status = f.get("status")
         if base.upper().startswith("CHANGELOG"):
+            # Added or edited in place only: a product file RENAMED to
+            # CHANGELOG.md is a product file leaving, not a changelog.
+            if status not in ("modified", "added"):
+                return False
             continue
         patch = f.get("patch")
-        if not patch or f.get("status") != "modified":
+        if not patch or status != "modified":
             return False
         lines = [x for x in patch.splitlines() if x[:1] in "+-"]
         minus = [x[1:] for x in lines if x[0] == "-"]
         plus = [x[1:] for x in lines if x[0] == "+"]
         if not plus or len(minus) != len(plus):
             return False
+        if base.endswith(".json") and len(plus) != 1:
+            return False    # a bump moves one line; more is something else
         for old, new in zip(minus, plus):
-            if not SEMVER.search(new) \
-                    or SEMVER.sub("V", old) != SEMVER.sub("V", new):
+            if SEMVER.sub("V", old) != SEMVER.sub("V", new):
                 return False
-            if base != "VERSION" and "version" not in new.lower():
+            if not (_version_line(base, old) and _version_line(base, new)):
                 return False
     return True
 
@@ -387,7 +435,9 @@ def merge_is_clean(repo: str, base: str, oid: str, parents: list[str]) -> bool:
                  "--jq", ".status", check=False).strip()
     if on_base not in ("behind", "identical"):
         return False
-    clone = find_clone(repo)
+    # The clone this run was told to use (--clone) counts too, not only the
+    # ones the search finds.
+    clone = find_clone(repo, _CACHE.get("clone_hint"))  # type: ignore[arg-type]
     if clone is None:
         return False
     for sha in (oid, *parents):
@@ -411,22 +461,22 @@ def verified_mechanical(repo: str, base: str, commits: list[dict]) -> set[str]:
     the PR's first commit.
     """
     proven: set[str] = set()
+    # Commits this very run created and pushed need no proof: the lander made
+    # them, in a clone that may be temporary and gone from every search path.
+    own: set[str] = _CACHE.get("own_commits", set())  # type: ignore[assignment]
     for c in reversed(commits[1:]):
         title = c.get("messageHeadline") or ""
         if not MECHANICAL_COMMIT.match(title):
             break
-        parents = [p["oid"] for p in (c.get("parents") or {}).get("nodes", [])]
+        if c.get("oid") in own:
+            proven.add(c["oid"])
+            continue
+        parents =[p["oid"] for p in (c.get("parents") or {}).get("nodes", [])]
         if title.startswith("Merge "):
             good = merge_is_clean(repo, base, c["oid"], parents)
         else:
-            raw = gh("api", f"repos/{repo}/commits/{c['oid']}", "--jq", ".files",
-                     check=False)
-            try:
-                files = json.loads(raw) if raw.strip() else []
-            except json.JSONDecodeError:
-                files = []
-            good = len(parents) == 1 and isinstance(files, list) \
-                and release_diff_is_mechanical(files)
+            good = len(parents) == 1 and release_diff_is_mechanical(
+                commit_files(repo, c["oid"]))
         if not good:
             break
         proven.add(c["oid"])
@@ -478,17 +528,37 @@ def head_facts(n: dict, commits: list[dict],
     suite_nodes = ((tail[-1] if tail else {}).get("checkSuites") or {}) \
         .get("nodes", [])
     suites = [_when(s["createdAt"]) for s in suite_nodes if s.get("createdAt")]
-    pushed = max(committed, min(suites)) if suites else committed
-    running: list[str] = []
-    for s in suite_nodes:
-        if not s.get("workflowRun"):
-            continue    # other apps leave a suite queued forever; ignore
+    if suites:
+        pushed = max(committed, min(suites))
+    else:
+        # No suite on the head yet, so the push time is unknown. The commit
+        # date is NOT it: a commit can be hours old when it is pushed. The
+        # PR's last update is at or after the push, so it errs toward "just
+        # pushed" and toward waiting, never the other way.
+        pushed = max(committed, _when(n.get("updatedAt")))
+    def unfinished(s: dict) -> bool:
         # A conclusion wins over a stale status, as in check_bucket.
-        if s.get("status") == "COMPLETED" or s.get("conclusion"):
-            continue
-        name = ((s["workflowRun"].get("workflow") or {}).get("name")
-                or "workflow")
-        if name not in running:
+        return not (s.get("status") == "COMPLETED" or s.get("conclusion"))
+
+    # Only the NEWEST run of each workflow, per triggering event, speaks for
+    # the head. A run can be left queued for good (seen 2026-11-11: runs
+    # created during an Actions outage could not start or be cancelled), and
+    # a later run of the same workflow for the same event on the same commit
+    # replaces it. At equal times the unfinished one is kept.
+    newest: dict[tuple[str, str], dict] = {}
+    for s in suite_nodes:
+        wf = s.get("workflowRun")
+        if not wf:
+            continue    # other apps leave a suite queued forever; ignore
+        key = ((wf.get("workflow") or {}).get("name") or "workflow",
+               wf.get("event") or "")
+        rank = (s.get("createdAt") or "", unfinished(s))
+        if key not in newest or rank > (newest[key].get("createdAt") or "",
+                                        unfinished(newest[key])):
+            newest[key] = s
+    running: list[str] = []
+    for (name, _event), s in newest.items():
+        if unfinished(s) and name not in running:
             running.append(name)
 
     # Walk back over the lander's own commits to the last one with real code.
@@ -587,6 +657,7 @@ def pr_from_node(repo: str, repo_node: dict,
         files=[f["path"] for f in (n.get("files") or {}).get("nodes", [])],
         files_total=(n.get("files") or {}).get("totalCount", 0),
         subjects=[c["messageHeadline"] for c in commits],
+        commit_oids=[c.get("oid") or "" for c in commits],
         checks=[check_bucket(c) for c in rollup],
         threads=threads,
         head_pushed=head["pushed"], review_clock=head["review_clock"],
@@ -595,6 +666,7 @@ def pr_from_node(repo: str, repo_node: dict,
         running_workflows=head["running"], unverifiable=unverifiable,
         merge_commit=(n.get("mergeCommit") or {}).get("oid"),
         methods=methods or ["merge"],
+        default_branch=(repo_node.get("defaultBranchRef") or {}).get("name") or "",
     )
 
 
@@ -699,6 +771,8 @@ NEXT_STEP = {
     "SUPERSEDED": "close it (sweep --apply does)",
     "AUTOFIX": "fold the fix into its source PR, or close it",
     "DRAFT": "finish it or close it",
+    "STACKED": "land the PR it is based on first; GitHub then retargets this "
+               "one to the default branch and it can land",
     "EXTERNAL": "outside contributor: the owner decides",
     "ELSEWHERE": "your PR in someone else's repo: its owner merges",
 }
@@ -707,7 +781,8 @@ STALE_STEP = "no movement: the owner decides, close or revive"
 
 def classify(pr: PR, now: datetime, trusted: set[str],
              owners: list[str] | None = None,
-             accept_missing: bool = False) -> Verdict:
+             accept_missing: bool = False,
+             ignore_conflict: bool = False) -> Verdict:
     if pr.state != "OPEN":
         return Verdict(pr.state)
     idle_days = (now - pr.updated).days
@@ -738,7 +813,12 @@ def classify(pr: PR, now: datetime, trusted: set[str],
         return verdict("DRAFT")
     if pr.unverifiable:
         return verdict("BLOCKED", *(f"cannot verify: {u}" for u in pr.unverifiable))
-    if pr.mergeable == "CONFLICTING":
+    if pr.default_branch and pr.base != pr.default_branch:
+        # Landing means reaching the default branch. Merging this one would
+        # only fold it into another PR's branch, behind that PR's back, and
+        # version or tag nothing real. It waits for the PR underneath it.
+        return verdict("STACKED", f"based on {pr.base}, not {pr.default_branch}")
+    if pr.mergeable == "CONFLICTING" and not ignore_conflict:
         return verdict("CONFLICT", f"conflicts with {pr.base}")
     failing = [n for n, b in pr.checks if b == "fail"]
     if failing:
@@ -752,6 +832,10 @@ def classify(pr: PR, now: datetime, trusted: set[str],
                        "ago; checks and review may not have registered yet")
     pending = [n for n, b in pr.checks if b == "pending"]
     if pending:
+        if since_push >= STALLED_CHECK_MIN:
+            return verdict("FAILING", *(f"{n} still running "
+                                        f"{int(since_push // 60)} h after the "
+                                        "push: stuck, re-run it" for n in pending))
         return verdict("WAITING", *(f"{n} running" for n in pending))
     have = {n for n, _ in pr.checks}
     missing = [n for n in pr.expected_checks if n not in have]
@@ -785,7 +869,9 @@ def classify(pr: PR, now: datetime, trusted: set[str],
         return verdict("REVIEW", f"{what}, and the PR body has no "
                        f"`{EVIDENCE_FORMAT}` line")
     since_review = (now - pr.review_clock).total_seconds() / 60
-    if not pr.reviewed_head and not pr.author_is_bot:
+    if not pr.reviewed_head:
+        # Bot authors (Dependabot) skip only the wait for a reviewer that has
+        # never shown up; one that HAS acted on the PR is owed for them too.
         if pr.reviewer_active and not accept_missing:
             # A reviewer works on this PR, so its silence on the head is not
             # "this repo has no reviewer": it never becomes READY by waiting.
@@ -794,7 +880,8 @@ def classify(pr: PR, now: datetime, trusted: set[str],
                                "yet (a reviewer acted on this PR earlier)")
             return verdict("FAILING", "a reviewer acted on this PR earlier but "
                            "has not reviewed this head: re-trigger it")
-        if not pr.reviewer_active and since_review < REVIEW_GRACE_MIN:
+        if not pr.reviewer_active and not pr.author_is_bot \
+                and since_review < REVIEW_GRACE_MIN:
             return verdict("WAITING", "no automated review of this head yet")
     return verdict("READY")
 
@@ -1133,10 +1220,31 @@ def detect_method(pr: PR) -> str:
     return want if want in pr.methods else pr.methods[0]
 
 
+def tag_commit(repo: str, tag: str) -> str | None:
+    """The commit a remote tag points at (annotated tags peeled), or None."""
+    out = gh("api", f"repos/{repo}/git/ref/tags/{tag}",
+             "--jq", '"\\(.object.type) \\(.object.sha)"', check=False).split()
+    if len(out) != 2 or not re.fullmatch(r"[0-9a-f]{40}", out[1]):
+        return None
+    kind, sha = out
+    if kind == "tag":
+        sha = gh("api", f"repos/{repo}/git/tags/{sha}", "--jq", ".object.sha",
+                 check=False).strip()
+    return sha if re.fullmatch(r"[0-9a-f]{40}", sha) else None
+
+
 def create_tag(repo: str, version: str, oid: str) -> str:
     tag = f"v{version}"
     if remote_tag_exists(repo, tag):
-        return f"tag {tag} already on the remote"
+        # Someone got there first (another machine: the lock is per machine).
+        # That is only fine if it is this very release.
+        at = tag_commit(repo, tag)
+        if at != oid:
+            raise ToolError(f"tag {tag} already exists at "
+                            f"{(at or 'an unreadable ref')[:9]}, not at the "
+                            f"merge commit {oid[:9]}; it is protected, so "
+                            "this needs a person")
+        return f"tag {tag} already on the merge commit"
     sha = gh("api", f"repos/{repo}/git/tags", "-f", f"tag={tag}",
              "-f", f"message=Version {version}", "-f", f"object={oid}",
              "-f", "type=commit", "--jq", ".sha").strip()
@@ -1202,10 +1310,11 @@ def cmd_land(ref: str, apply: bool = False, level: str | None = None,
     repo, number = parse_ref(ref)
     trusted = trusted if trusted is not None else trusted_authors()
     owners = owners if owners is not None else _owners(None)
+    _CACHE["clone_hint"] = clone      # so proofs can use the same clone
     pr = fetch_pr(repo, number)
     print(f"{pr.ref}  {pr.title}")
     if pr.state == "MERGED":
-        return finish_merged(pr, apply)
+        return finish_merged(pr, apply, trusted, owners)
     if pr.state != "OPEN":
         print(f"  already {pr.state.lower()}; nothing to land")
         return 0
@@ -1229,6 +1338,15 @@ def cmd_land(ref: str, apply: bool = False, level: str | None = None,
     repair = v.state == "CONFLICT" and plan.level != "none" and not pr.cross_repo
     if v.state != "READY" and not repair:
         return refuse(pr, v)
+    if repair:
+        # Every other gate first. The repair pushes to the branch, and nothing
+        # is pushed to a PR that would be refused anyway (open threads, no
+        # review of the head, a failing check).
+        rest = classify(pr, datetime.now(timezone.utc), trusted, owners,
+                        accept_missing, ignore_conflict=True)
+        if rest.state != "READY":
+            print(f"  CONFLICT with {pr.base}; and apart from the conflict:")
+            return refuse(pr, rest)
     method = method or detect_method(pr)
     print(f"  release: {plan.level}  ({plan.source})")
     if plan.level != "none":
@@ -1236,9 +1354,9 @@ def cmd_land(ref: str, apply: bool = False, level: str | None = None,
                                else "none in the PR body; drafted from commits"))
     print(f"  merge:   {method}, delete branch, tag after merge")
     if repair:
-        print(f"  CONFLICT with {pr.base}: --apply checks whether a stale version "
-              "bump on the branch is the cause, drops it, merges the base and "
-              "re-cuts. Any other conflict is refused, nothing pushed.")
+        print(f"  CONFLICT with {pr.base}: --apply checks whether a version "
+              "bump already on the branch is the cause, drops it, merges the "
+              "base and re-cuts. Any other conflict is refused, nothing pushed.")
     if not apply:
         print("  (dry run: pass --apply to land)")
         return 1 if repair else 0
@@ -1252,20 +1370,29 @@ def cmd_land(ref: str, apply: bool = False, level: str | None = None,
                 base_ref = f"origin/{pr.base}"
                 taken = lambda tag: remote_tag_exists(repo, tag)  # noqa: E731
                 state, head_v = bump_state(vt, ws.wt, base_ref, taken)
-                if repair and state != "stale":
+                # A bump on the branch can conflict with the base even while
+                # its number is still the right next one (branch 1.0.0->1.1.0,
+                # base moved to 1.0.1): the version line and the changelog
+                # were both touched on each side. So in a repair any bump on
+                # the branch is dropped and re-cut, "current" included.
+                if repair and state not in ("stale", "current"):
                     return refuse(pr, v)    # a real conflict: not ours to fix
                 if state == "noversion":
                     print("  NOTE: no version location in this repo; landing "
                           "without a bump. Run version_tool.py backfill here.")
-                elif state == "current":
+                elif state == "current" and not repair:
                     version = head_v
                     print(f"  bump v{version} on the branch is current")
                 else:
-                    if state == "stale":
-                        print(f"  bump v{head_v} on the branch is stale; re-cutting")
+                    if state in ("stale", "current"):
+                        print(f"  bump v{head_v} on the branch "
+                              f"{'conflicts with' if repair else 'is stale against'}"
+                              f" {pr.base}; re-cutting")
                     version = prepare_branch(vt, vt_path, ws.wt, base_ref,
                                              plan.level, plan.notes, taken,
                                              ws.tmp)
+                    made = git(ws.wt, "rev-list", f"{pr.head_oid}..HEAD").split()
+                    _CACHE.setdefault("own_commits", set()).update(made)  # type: ignore[union-attr]
                     git(ws.wt, "push", "origin", f"HEAD:refs/heads/{pr.head}")
                     oid = git(ws.wt, "rev-parse", "HEAD").strip()
                     print(f"  pushed bump v{version} ({oid[:9]}); waiting on checks")
@@ -1360,14 +1487,67 @@ def after_merge(pr: PR, version: str | None) -> int:
     return 0
 
 
-def finish_merged(pr: PR, apply: bool) -> int:
+def commit_files(repo: str, oid: str) -> list[dict]:
+    raw = gh("api", f"repos/{repo}/commits/{oid}", "--jq", ".files", check=False)
+    try:
+        files = json.loads(raw) if raw.strip() else []
+    except json.JSONDecodeError:
+        return []
+    return files if isinstance(files, list) else []
+
+
+def confirmed_version(pr: PR) -> tuple[str | None, str]:
+    """(version, why not) for a merged PR whose commits name a release.
+
+    A commit subject is only a claim, and a tag cannot be taken back, so the
+    claim is checked twice before anything is tagged: the release commit must
+    be a pure version bump, and a file it bumped must declare that version
+    at the merge commit.
+    """
+    version = landed_version(pr)
+    if not version or not pr.merge_commit:
+        return None, ""
+    wanted = f"chore(release): v{version}"
+    at = max((i for i, s in enumerate(pr.subjects) if s == wanted), default=-1)
+    oid = pr.commit_oids[at] if 0 <= at < len(pr.commit_oids) else ""
+    files = commit_files(pr.repo, oid) if oid else []
+    if not release_diff_is_mechanical(files):
+        return None, "its release commit changes more than version lines"
+    for f in files:
+        name = f.get("filename") or ""
+        base = name.rsplit("/", 1)[-1]
+        if base.upper().startswith("CHANGELOG"):
+            continue
+        text = gh("api", f"repos/{pr.repo}/contents/{name}?ref={pr.merge_commit}",
+                  "-H", "Accept: application/vnd.github.raw", check=False)
+        if any(_version_line(base, line) and version in SEMVER.findall(line)
+               for line in text.splitlines()):
+            return version, ""
+    return None, f"no version file declares {version} at the merge commit"
+
+
+def finish_merged(pr: PR, apply: bool, trusted: set[str],
+                  owners: list[str]) -> int:
     """`land` on a PR that is already merged: finish a landing that stopped
     after the merge (tag refused, process killed) instead of calling it done."""
-    version = landed_version(pr)
-    untagged = bool(version and pr.merge_commit
-                    and not remote_tag_exists(pr.repo, f"v{version}"))
-    if not untagged:
-        version = None
+    # The same trust an open PR needs: your PR, in a repository that is yours.
+    home = {o.lower() for o in owners}
+    if (not pr.author_is_bot and pr.author.lower() not in trusted) \
+            or pr.repo.split("/", 1)[0].lower() not in home:
+        print("  already merged; not your PR or not your repository, so "
+              "nothing is tagged or cleaned up from here")
+        return 0
+    claimed = landed_version(pr)
+    version: str | None = None
+    untagged = bool(claimed and pr.merge_commit
+                    and not remote_tag_exists(pr.repo, f"v{claimed}"))
+    if untagged:
+        version, why = confirmed_version(pr)
+        if version is None:
+            print(f"  already merged. A commit names v{claimed} and it is not "
+                  f"tagged, but that could not be confirmed: {why}. Nothing "
+                  "is tagged; if the version is right, tag it by hand.")
+            return 1
     if not apply:
         if untagged:
             print(f"  already merged, but v{version} is not tagged: --apply "
@@ -1396,7 +1576,8 @@ def collect(owners: list[str], repo: str | None) -> list[tuple[str, int]]:
 
 
 ORDER = ["READY", "SUPERSEDED", "THREADS", "FAILING", "CONFLICT", "REVIEW",
-         "BLOCKED", "WAITING", "AUTOFIX", "DRAFT", "EXTERNAL", "ELSEWHERE"]
+         "BLOCKED", "WAITING", "STACKED", "AUTOFIX", "DRAFT", "EXTERNAL",
+         "ELSEWHERE"]
 
 
 def survey(owners: list[str], repo: str | None, trusted: set[str]

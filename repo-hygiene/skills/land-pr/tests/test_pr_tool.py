@@ -154,6 +154,71 @@ def test_check_seen_on_an_earlier_commit_must_report_on_the_head():
         assert v.state in ("WAITING", "FAILING") and "security" in v.reasons[0]
 
 
+def test_a_pr_based_on_another_prs_branch_is_never_landed_by_itself():
+    # plugins#10, 2026-11-11: green, reviewed, and based on #9's branch.
+    # Merging it would fold it into #9 behind that PR's back.
+    stacked = make(base="fix/version-manager-sync", default_branch="main")
+    v = pt.classify(stacked, NOW, ME)
+    assert v.state == "STACKED"
+    assert v.reasons == ["based on fix/version-manager-sync, not main"]
+    assert pt.classify(make(base="main", default_branch="main"), NOW, ME).state == "READY"
+    assert pt.classify(make(base="master", default_branch="master"), NOW, ME).state == "READY"
+    # The default branch is read from the repository node.
+    t0 = NOW - timedelta(hours=3)
+    node = _node([("a1", "fix: thing", t0)], rollup=["ci", "CodeRabbit"],
+                 tail=[("a1", t0, ["ci", "CodeRabbit"])])
+    node["pullRequest"]["baseRefName"] = "feat/parent"
+    pr = pt.pr_from_node("octo-user/r", {"pullRequest": node["pullRequest"],
+                                       "defaultBranchRef": {"name": "main"}})
+    assert pr.default_branch == "main" and pt.classify(pr, NOW, ME).state == "STACKED"
+
+
+def test_land_refuses_a_stacked_pr(monkeypatch, capsys):
+    calls = _land_env(monkeypatch, [make(base="feat/parent", default_branch="main",
+                                         files=CI_ONLY)])
+    assert pt.cmd_land("octo-user/r#7", apply=True, trusted=ME) == 1
+    assert calls == [] and "STACKED" in capsys.readouterr().out
+
+
+def test_a_newer_run_of_the_same_workflow_replaces_a_dead_one():
+    # plugins#9, 2026-11-11: runs created during an Actions outage stayed
+    # queued for good and could not be cancelled; re-firing the event gave
+    # the same commit a second, successful run of each workflow.
+    t0 = NOW - timedelta(hours=2)
+
+    def suite(minutes_ago, workflow, status, conclusion=None, event="pull_request"):
+        return {"createdAt": (NOW - timedelta(minutes=minutes_ago)).isoformat(),
+                "status": status, "conclusion": conclusion,
+                "workflowRun": {"event": event, "workflow": {"name": workflow}}}
+
+    def running(*suites):
+        node = _node([("a1", "fix: thing", t0)], rollup=["ci", "CodeRabbit"],
+                     tail=[("a1", t0, ["ci", "CodeRabbit"])])
+        node["pullRequest"]["tail"]["nodes"][-1]["commit"]["checkSuites"] = {
+            "nodes": list(suites)}
+        return _pr(node).running_workflows
+
+    dead = [suite(60, "security", "QUEUED"), suite(60, "validate", "QUEUED")]
+    assert running(*dead) == ["security", "validate"]
+    rerun = [suite(20, "security", "COMPLETED", "SUCCESS"),
+             suite(20, "validate", "COMPLETED", "SUCCESS")]
+    assert running(*dead, *rerun) == []
+    assert running(*rerun, *dead) == []                  # order does not matter
+    # Only the workflow that was re-run is cleared.
+    assert running(*dead, rerun[0]) == ["validate"]
+    # The newest run being the unfinished one still blocks: that is a re-run
+    # in progress, not a ghost.
+    assert running(suite(60, "security", "COMPLETED", "SUCCESS"),
+                   suite(5, "security", "IN_PROGRESS")) == ["security"]
+    # A run for a different event does not vouch for this one.
+    assert running(suite(60, "security", "QUEUED", event="pull_request"),
+                   suite(20, "security", "COMPLETED", "SUCCESS", event="push")) \
+        == ["security"]
+    # Same instant: the unfinished one is believed.
+    assert running(suite(20, "security", "COMPLETED", "SUCCESS"),
+                   suite(20, "security", "QUEUED")) == ["security"]
+
+
 def _node(commits, *, reviews=(), comments=(), rollup=(), tail=None):
     """A minimal GraphQL pullRequest node; commits are (oid, subject, when)."""
     def run(name, conclusion="SUCCESS"):
@@ -335,6 +400,25 @@ def test_a_release_commit_is_mechanical_only_if_its_diff_is():
     swapped = f("package.json", '@@ -2 +2 @@\n-  "version": "1.4.1",\n'
                                 '+  "version": "1.4.2", "scripts": {"x": "y"},')
     assert not pt.release_diff_is_mechanical([swapped])
+    # A dependency whose NAME contains "version" is still a dependency.
+    named = f("package.json", '@@ -9 +9 @@\n-    "compare-versions": "6.1.0"\n'
+                              '+    "compare-versions": "6.1.1"')
+    assert not pt.release_diff_is_mechanical([named])
+    # A lockfile is nothing but "version" lines for other packages.
+    lock = f("package-lock.json", '@@ -40 +40 @@\n-      "version": "1.3.0",\n'
+                                  '+      "version": "1.3.1",')
+    assert not pt.release_diff_is_mechanical([lock])
+    # One JSON file, two "version" lines moved: a bump moves one.
+    two = f("package.json", '@@ -2 +2 @@\n-  "version": "1.4.1",\n'
+                            '+  "version": "1.4.2",\n@@ -30 +30 @@\n'
+                            '-      "version": "2.0.0"\n+      "version": "2.0.1"')
+    assert not pt.release_diff_is_mechanical([two])
+    # A product file renamed to CHANGELOG.md is not a changelog edit.
+    renamed = {"filename": "CHANGELOG.md", "status": "renamed",
+               "previous_filename": "src/app.py", "patch": ""}
+    assert not pt.release_diff_is_mechanical(bump[:1] + [renamed])
+    assert pt.release_diff_is_mechanical(
+        bump[:1] + [f("CHANGELOG.md", "@@ -0,0 +1 @@\n+# Changelog", "added")])
     # What the patch does not show cannot be vouched for.
     assert not pt.release_diff_is_mechanical([f("logo.png", None)])
     assert not pt.release_diff_is_mechanical([f("new.py", "@@ +1 @@\n+x", "added")])
@@ -366,6 +450,47 @@ def test_verified_mechanical_walks_back_and_stops_at_the_first_failure(monkeypat
     only = [c("r1", "chore(release): v1.0.0", ["z0"])]
     monkeypatch.setattr(pt, "gh", lambda *a, **k: good_bump)
     assert pt.verified_mechanical("o/r", "main", only) == set()
+    # Commits this run made and pushed itself need no proof, even with no
+    # clone anywhere to check them in (a temporary clone, or --clone).
+    monkeypatch.setattr(pt, "gh", lambda *a, **k: "")
+    monkeypatch.setattr(pt, "merge_is_clean", lambda *a: False)
+    assert pt.verified_mechanical("o/r", "main", commits) == set()
+    monkeypatch.setitem(pt._CACHE, "own_commits", {"m2", "r3"})
+    assert pt.verified_mechanical("o/r", "main", commits) == {"m2", "r3"}
+
+
+def test_gates_added_by_the_third_review_round():
+    # Unknown push time (no check suite on the head yet) means "just
+    # pushed", never "as old as the commit": a 2-hour-old local commit that
+    # has only now been pushed must wait.
+    old = NOW - timedelta(hours=2)
+    node = _node([("a1", "fix: thing", old)], rollup=[], tail=[("a1", None, [])])
+    pr = _pr(node)
+    assert pr.head_pushed == NOW                 # the PR's updatedAt
+    assert pt.classify(pr, NOW, ME).state == "WAITING"
+
+    # A reviewer that has acted on a bot's PR is owed for the bot too; only
+    # the wait for a reviewer that never showed up is skipped for bots.
+    bot = dict(author="dependabot", author_is_bot=True, reviewed_head=False,
+               head_committed=NOW - timedelta(minutes=20))
+    assert pt.classify(make(**bot), NOW, ME).state == "READY"
+    assert pt.classify(make(**bot, reviewer_active=True), NOW, ME).state == "WAITING"
+
+    # A check pending beyond any real job's lifetime is stuck, not slow.
+    running = [("ci", "pending")]
+    assert state(checks=running, head_committed=NOW - timedelta(hours=2)) == "WAITING"
+    v = pt.classify(make(checks=running, head_committed=NOW - timedelta(hours=7)),
+                    NOW, ME)
+    assert v.state == "FAILING" and "still running 7 h" in v.reasons[0]
+
+    # Punctuated and qualified negatives are still negatives.
+    sensitive = ["lib/auth/session.ts"]
+    for body in ("Adversarial review: No.", "Adversarial review: no!",
+                 "Adversarial review: no, not run", "Adversarial review: NO"):
+        assert state(files=sensitive, body=body) == "REVIEW", body
+    for body in ("Adversarial review: no findings (codex)",
+                 "Adversarial review: No issues."):
+        assert state(files=sensitive, body=body) == "READY", body
 
 
 def test_outside_contributor_is_never_ready():
@@ -505,32 +630,95 @@ def test_land_does_not_tag_or_clean_up_until_github_says_merged(monkeypatch, cap
     assert "LANDED octo-user/r#7" in capsys.readouterr().out
 
 
-def test_land_on_a_merged_pr_finishes_the_tag_it_missed(monkeypatch, capsys):
-    merged = make(state="MERGED", merge_commit="c" * 40,
-                  subjects=["fix: thing", "chore(release): v1.4.2"])
-    tags = ("api", "repos/octo-user/r/git/tags")
-    calls = _land_env(monkeypatch, [merged])
-    monkeypatch.setattr(pt, "remote_tag_exists", lambda repo, tag: False)
-    assert pt.cmd_land("octo-user/r#7", trusted=ME) == 10       # dry run: work pending
-    assert calls == [] and "v1.4.2 is not tagged" in capsys.readouterr().out
-    assert pt.cmd_land("octo-user/r#7", apply=True, trusted=ME) == 0
-    assert tags in [c[:2] for c in calls]
+VERSION_BUMP = json.dumps([{"filename": "VERSION", "status": "modified",
+                            "patch": "@@ -1 +1 @@\n-1.4.1\n+1.4.2"}])
+TAGS = ("api", "repos/octo-user/r/git/tags")
 
-    # The tag is refused again: say so and exit non-zero, never "LANDED".
-    def refused(*args, **kw):
-        if args[:2] == tags:
+
+def _merged_env(monkeypatch, merged, *, release_commit=VERSION_BUMP,
+                version_file="1.4.2\n", tag_refused=False):
+    """A merged PR whose release commit is r3; gh answers by endpoint."""
+    _land_env(monkeypatch, [merged])
+    calls = []
+
+    def gh(*args, **kw):
+        calls.append(args)
+        if args[:2] == ("api", "repos/octo-user/r/commits/r3"):
+            return release_commit
+        if len(args) > 1 and args[1].startswith("repos/octo-user/r/contents/VERSION"):
+            return version_file
+        if args[:2] == TAGS and tag_refused:
             raise pt.ToolError("protected tag")
         return ""
-    monkeypatch.setattr(pt, "gh", refused)
+    monkeypatch.setattr(pt, "gh", gh)
+    monkeypatch.setattr(pt, "remote_tag_exists", lambda repo, tag: False)
+    return calls
+
+
+def test_land_on_a_merged_pr_finishes_the_tag_it_missed(monkeypatch, capsys):
+    merged = make(state="MERGED", merge_commit="c" * 40,
+                  subjects=["fix: thing", "chore(release): v1.4.2"],
+                  commit_oids=["a1", "r3"])
+    calls = _merged_env(monkeypatch, merged)
+    assert pt.cmd_land("octo-user/r#7", trusted=ME) == 10       # dry run: work pending
+    assert TAGS not in [c[:2] for c in calls]
+    assert "v1.4.2 is not tagged" in capsys.readouterr().out
+    assert pt.cmd_land("octo-user/r#7", apply=True, trusted=ME) == 0
+    assert TAGS in [c[:2] for c in calls]
+
+    # The tag is refused again: say so and exit non-zero, never "LANDED".
+    _merged_env(monkeypatch, merged, tag_refused=True)
     assert pt.cmd_land("octo-user/r#7", apply=True, trusted=ME) == 1
     out = capsys.readouterr().out
     assert "TAG FAILED" in out and "LANDED" not in out.split("TAG FAILED")[1]
 
     # Already tagged: nothing to do.
-    calls = _land_env(monkeypatch, [merged])
+    calls = _merged_env(monkeypatch, merged)
     monkeypatch.setattr(pt, "remote_tag_exists", lambda repo, tag: True)
     assert pt.cmd_land("octo-user/r#7", trusted=ME) == 0
     assert calls == []
+
+
+def test_a_merged_pr_is_tagged_only_when_the_version_is_confirmed(monkeypatch, capsys):
+    merged = make(state="MERGED", merge_commit="c" * 40,
+                  subjects=["fix: thing", "chore(release): v1.4.2"],
+                  commit_oids=["a1", "r3"])
+    # The subject says 1.4.2 but the merge commit's VERSION file says 1.4.1.
+    calls = _merged_env(monkeypatch, merged, version_file="1.4.1\n")
+    assert pt.cmd_land("octo-user/r#7", apply=True, trusted=ME) == 1
+    assert TAGS not in [c[:2] for c in calls]
+    assert "no version file declares 1.4.2" in capsys.readouterr().out
+    # A "release" commit that also changed code is not a release commit.
+    code = json.dumps([{"filename": "src/app.py", "status": "modified",
+                        "patch": "@@ -1 +1 @@\n-x = 1\n+x = 2"}])
+    calls = _merged_env(monkeypatch, merged, release_commit=code)
+    assert pt.cmd_land("octo-user/r#7", apply=True, trusted=ME) == 1
+    assert TAGS not in [c[:2] for c in calls]
+    # Someone else's PR, or someone else's repository: nothing at all.
+    for other in (make(state="MERGED", merge_commit="c" * 40, author="Mr-Neutr0n",
+                       subjects=["chore(release): v1.4.2"], commit_oids=["r3"]),
+                  make(state="MERGED", merge_commit="c" * 40, repo="acme/widgets",
+                       subjects=["chore(release): v1.4.2"], commit_oids=["r3"])):
+        calls = _merged_env(monkeypatch, other)
+        assert pt.cmd_land(other.ref, apply=True, trusted=ME) == 0
+        assert calls == []
+
+
+def test_an_existing_tag_must_point_at_the_merge_commit(monkeypatch):
+    merge, other = "c" * 40, "d" * 40
+    monkeypatch.setattr(pt, "remote_tag_exists", lambda repo, tag: True)
+    monkeypatch.setattr(pt, "tag_commit", lambda repo, tag: merge)
+    assert "already on the merge commit" in pt.create_tag("o/r", "1.4.2", merge)
+    monkeypatch.setattr(pt, "tag_commit", lambda repo, tag: other)
+    with pytest.raises(pt.ToolError, match="not at the merge commit"):
+        pt.create_tag("o/r", "1.4.2", merge)
+    # tag_commit peels an annotated tag to its commit.
+    answers = {"repos/o/r/git/ref/tags/v1.4.2": f"tag {'e' * 40}\n",
+               f"repos/o/r/git/tags/{'e' * 40}": merge + "\n"}
+    monkeypatch.undo()
+    monkeypatch.setattr(pt, "gh", lambda *a, **k: answers.get(a[1], ""))
+    assert pt.tag_commit("o/r", "v1.4.2") == merge
+    assert pt.tag_commit("o/r", "v9.9.9") is None
 
 
 def test_conflict_is_refused_unless_a_stale_bump_explains_it(monkeypatch, capsys):
@@ -542,7 +730,18 @@ def test_conflict_is_refused_unless_a_stale_bump_explains_it(monkeypatch, capsys
     shipping = make(mergeable="CONFLICTING")
     _land_env(monkeypatch, [shipping])
     assert pt.cmd_land("octo-user/r#7", trusted=ME) == 1
-    assert "stale version bump" in capsys.readouterr().out
+    assert "version bump already on the branch" in capsys.readouterr().out
+    # Every other gate is checked BEFORE any repair: a conflicted PR with an
+    # open thread is refused without a worktree, a push or a merge.
+    thread = {"id": "T1", "path": "a.py", "line": 3, "outdated": False,
+              "author": "coderabbitai", "body": "x", "url": ""}
+    calls = _land_env(monkeypatch, [make(mergeable="CONFLICTING", threads=[thread])])
+    opened = []
+    monkeypatch.setattr(pt, "Workspace", lambda *a: opened.append(a))
+    assert pt.cmd_land("octo-user/r#7", apply=True, trusted=ME) == 1
+    assert calls == [] and opened == []
+    out = capsys.readouterr().out
+    assert "apart from the conflict" in out and "THREADS" in out
 
     # --apply looks, finds no stale bump, and refuses without pushing or merging.
     class NoWorktree:
@@ -560,6 +759,21 @@ def test_conflict_is_refused_unless_a_stale_bump_explains_it(monkeypatch, capsys
     assert pt.cmd_land("octo-user/r#7", apply=True, trusted=ME) == 1
     assert calls == [] and pushed == []
     assert "CONFLICT: conflicts with main" in capsys.readouterr().out
+
+    # A bump whose NUMBER is still right can conflict all the same (branch
+    # 1.0.0 -> 1.1.0, base moved to 1.0.1): in a repair it is re-cut too,
+    # not kept as "current" and left stuck.
+    for state in ("current", "stale"):
+        recut = []
+        monkeypatch.setattr(pt, "bump_state", lambda *a, s=state: (s, "1.1.0"))
+
+        def prepare(*a, **k):
+            recut.append(a)
+            raise pt.ToolError("merging the base branch conflicts in: app.js")
+        monkeypatch.setattr(pt, "prepare_branch", prepare)
+        with pytest.raises(pt.ToolError, match="conflicts in: app.js"):
+            pt.cmd_land("octo-user/r#7", apply=True, trusted=ME)
+        assert len(recut) == 1 and calls == [] and pushed == []
 
 
 def test_check_bucket_maps_rollup_nodes():
