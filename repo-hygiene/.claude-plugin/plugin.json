@@ -1,7 +1,7 @@
 {
   "name": "repo-hygiene",
-  "description": "Keep any repo's agent-facing layer healthy \u2014 version-manager (standardized version bumps + changelogs, auto-detects where the version lives), repo-doctor (audit of AGENTS.md/CLAUDE.md topology, CodeMap freshness, token cost, doc drift), claude-md-optimizer (rightsize CLAUDE.md per Anthropic context-engineering guidance), and unify-agents-md (make AGENTS.md the single canonical guide every coding CLI follows).",
-  "version": "0.2.0",
+  "description": "Keep any repo's agent-facing layer healthy \u2014 version-manager (standardized version bumps + changelogs, auto-detects where the version lives), repo-doctor (audit of AGENTS.md/CLAUDE.md topology, CodeMap freshness, token cost, doc drift), claude-md-optimizer (rightsize CLAUDE.md per Anthropic context-engineering guidance), unify-agents-md (make AGENTS.md the single canonical guide every coding CLI follows), and land-pr (finish pull requests: classify every open PR, cut the version bump at merge time, merge, tag the merge commit, close superseded autofix drafts).",
+  "version": "0.3.0",
   "author": {
     "name": "Chameleon Labs LLC",
     "email": "hello@chameleonlabs.ai"
@@ -17,6 +17,8 @@
     "claude-md",
     "audit",
     "context-engineering",
-    "documentation"
+    "documentation",
+    "pull-requests",
+    "merge"
   ]
 }
