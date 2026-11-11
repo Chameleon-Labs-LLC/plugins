@@ -346,15 +346,40 @@ def _extract(text: str, kind: str) -> str | None:
     if kind in SPAN_KINDS:
         span = _version_span(text, kind)
         return text[span[0]:span[1]] if span else None
+    if kind == "csproj":
+        live = _outside_comments(PATTERNS[kind], text)
+        return live[0].group("v") if live else None
     m = PATTERNS[kind].search(text)
     return m.group("v") if m else None
+
+
+XML_COMMENT = re.compile(r"<!--.*?-->", re.S)
+
+
+def _outside_comments(pattern: re.Pattern[str], text: str) -> list[re.Match[str]]:
+    """Matches of `pattern` in an XML file that are not inside a comment.
+
+    `<!-- <Version>1.0.0</Version> -->` is a note to a person, not a
+    declaration: it must be neither read as the project's version nor
+    rewritten by a release.
+    """
+    dead = [m.span() for m in XML_COMMENT.finditer(text)]
+    return [m for m in pattern.finditer(text)
+            if not any(a <= m.start() < b for a, b in dead)]
+
+
+def _sub_outside_comments(pattern: re.Pattern[str], repl, text: str) -> str:
+    """pattern.sub(repl, text) that leaves matches inside XML comments alone."""
+    live = {m.start() for m in _outside_comments(pattern, text)}
+    return pattern.sub(lambda m: repl(m) if m.start() in live else m.group(0),
+                       text)
 
 
 def _extract_all(text: str, kind: str) -> list[str]:
     """Every version a file declares. More than one only for csproj, where
     each PropertyGroup may carry its own <Version>."""
     if kind == "csproj":
-        return [m.group("v") for m in PATTERNS[kind].finditer(text)]
+        return [m.group("v") for m in _outside_comments(PATTERNS[kind], text)]
     value = _extract(text, kind)
     return [value] if value is not None else []
 
@@ -566,19 +591,25 @@ def write_version(repo: Path, loc: Location, new: str) -> None:
         _write(repo / loc.path, text[:span[0]] + new + text[span[1]:])
         return
     pattern = PATTERNS[loc.kind]
-    if not pattern.search(text):
-        raise GitError(f"no version pattern in {loc.path}")
-    # csproj: every PropertyGroup's declaration moves together, or a release
-    # would tag the new version while a later group still builds the old one.
-    every = 0 if loc.kind == "csproj" else 1
-    updated = pattern.sub(lambda m: m.group("pre") + new + m.group("post"),
-                          text, count=every)
     if loc.kind == "csproj":
+        # Every PropertyGroup's declaration moves together, or a release
+        # would tag the new version while a later group still builds the old
+        # one. Declarations inside XML comments are left exactly as written.
+        if not _outside_comments(pattern, text):
+            raise GitError(f"no version pattern in {loc.path}")
+        updated = _sub_outside_comments(
+            pattern, lambda m: m.group("pre") + new + m.group("post"), text)
         # Keep the 4-part assembly metadata in step with <Version>.
         for tag in ("AssemblyVersion", "FileVersion"):
-            updated = re.sub(
-                rf"(<{tag}>\s*)\d+\.\d+\.\d+(?:\.\d+)?(\s*</{tag}>)",
-                rf"\g<1>{new}.0\g<2>", updated)
+            updated = _sub_outside_comments(
+                re.compile(rf"(<{tag}>\s*)\d+\.\d+\.\d+(?:\.\d+)?(\s*</{tag}>)"),
+                lambda m: f"{m.group(1)}{new}.0{m.group(2)}", updated)
+        _write(repo / loc.path, updated)
+        return
+    if not pattern.search(text):
+        raise GitError(f"no version pattern in {loc.path}")
+    updated = pattern.sub(lambda m: m.group("pre") + new + m.group("post"),
+                          text, count=1)
     _write(repo / loc.path, updated)
 
 
