@@ -6,6 +6,11 @@
 # used by the `scan-download` command. No sudo required: pipx + npm-global +
 # two static binaries dropped into ~/.local/bin.
 #
+# Platforms: Linux and macOS, on x86_64 or arm64. On Windows, run it inside WSL.
+# Prerequisites: curl, jq, tar, pipx
+#   macOS:          brew install pipx jq
+#   Debian/Ubuntu:  sudo apt install pipx jq
+#
 # Tools installed:
 #   guarddog   (pipx)  - heuristic MALWARE detection for PyPI & npm packages
 #   semgrep    (pipx)  - SAST: insecure code patterns in the source itself
@@ -27,6 +32,37 @@ mkdir -p "$BIN"
 say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m!!  %s\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32m  ok %s\033[0m\n' "$*"; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ---------------------------------------------------------------------------
+# 0. platform + prerequisites
+# ---------------------------------------------------------------------------
+case "$(uname -s)" in
+  Linux)  OSV_OS=linux;  TRIVY_OS=Linux ;;
+  Darwin) OSV_OS=darwin; TRIVY_OS=macOS ;;
+  MINGW*|MSYS*|CYGWIN*)
+    echo "install-security-scanners.sh: the scanners are Linux tools; run this inside WSL:" >&2
+    echo "  wsl.exe -e bash -lc 'bash /mnt/<drive>/<path-to>/install-security-scanners.sh'" >&2
+    exit 2 ;;
+  *) echo "install-security-scanners.sh: unsupported OS '$(uname -s)'" >&2; exit 2 ;;
+esac
+case "$(uname -m)" in
+  x86_64|amd64)  OSV_ARCH=amd64; TRIVY_ARCH=64bit ;;
+  arm64|aarch64) OSV_ARCH=arm64; TRIVY_ARCH=ARM64 ;;
+  *) echo "install-security-scanners.sh: unsupported CPU '$(uname -m)'" >&2; exit 2 ;;
+esac
+
+missing=()
+for c in curl jq tar pipx; do have "$c" || missing+=("$c"); done
+if [ "${#missing[@]}" -gt 0 ]; then
+  echo "install-security-scanners.sh: missing prerequisites: ${missing[*]}" >&2
+  if [ "$OSV_OS" = darwin ]; then
+    echo "  Install them with: brew install ${missing[*]}" >&2
+  else
+    echo "  Install them with your package manager, e.g.: sudo apt install ${missing[*]}" >&2
+  fi
+  exit 2
+fi
 
 # ---------------------------------------------------------------------------
 # 1. pipx tools (isolated venvs, never pollute system python)
@@ -45,11 +81,11 @@ done
 # 2. osv-scanner  (static Go binary, fetched from GitHub releases)
 # ---------------------------------------------------------------------------
 say "Installing osv-scanner -> $BIN/osv-scanner"
-OSV_URL=$(curl -fsSL https://api.github.com/repos/google/osv-scanner/releases/latest \
-  | jq -r '.assets[]
-           | select(.name | test("linux_amd64"))
-           | select(.name | test("\\.(sig|pem|sbom|json)$") | not)
-           | .browser_download_url' | head -1)
+# `|| true`: under set -e a failed API call (rate limit) would abort the whole
+# installer instead of reaching the "Skipping" branch below.
+OSV_URL=$({ curl -fsSL https://api.github.com/repos/google/osv-scanner/releases/latest \
+  | jq -r --arg n "osv-scanner_${OSV_OS}_${OSV_ARCH}" \
+      '.assets[] | select(.name == $n) | .browser_download_url' | head -1; } || true)
 if [ -z "${OSV_URL:-}" ]; then
   warn "Could not resolve osv-scanner asset URL (GitHub API rate limit?). Skipping."
 else
@@ -62,8 +98,9 @@ fi
 # 3. trivy  (static binary, extracted from GitHub release tarball)
 # ---------------------------------------------------------------------------
 say "Installing trivy -> $BIN/trivy"
-TRIVY_URL=$(curl -fsSL https://api.github.com/repos/aquasecurity/trivy/releases/latest \
-  | jq -r '.assets[] | select(.name | test("Linux-64bit\\.tar\\.gz$")) | .browser_download_url' | head -1)
+TRIVY_URL=$({ curl -fsSL https://api.github.com/repos/aquasecurity/trivy/releases/latest \
+  | jq -r --arg s "_${TRIVY_OS}-${TRIVY_ARCH}.tar.gz" \
+      '.assets[] | select(.name | endswith($s)) | .browser_download_url' | head -1; } || true)
 if [ -z "${TRIVY_URL:-}" ]; then
   warn "Could not resolve trivy asset URL. Skipping."
 else
@@ -95,7 +132,11 @@ echo
 echo "Verify:"
 for t in guarddog semgrep pip-audit osv-scanner trivy; do
   printf '  %-12s ' "$t"
-  command -v "$t" >/dev/null 2>&1 && echo "ok" || echo "MISSING"
+  have "$t" && echo "ok" || echo "MISSING"
 done
+case ":$PATH:" in
+  *":$BIN:"*) ;;
+  *) warn "$BIN is not on PATH. Run 'pipx ensurepath', then open a new shell." ;;
+esac
 echo
 echo "Next: scan-download /path/to/some-cloned-repo"

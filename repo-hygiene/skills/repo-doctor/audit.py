@@ -356,7 +356,8 @@ class Audit:
             out = subprocess.run(
                 ['git', '-C', self.root, 'grep', '-lE',
                  r'^(VERSION|__version__)\s*=', '--', '*.py'],
-                capture_output=True, text=True, timeout=15).stdout.split()
+                capture_output=True, text=True, encoding='utf-8',
+                errors='replace', timeout=15).stdout.split()
             for f in out[:5]:
                 body = read(rel(self.root, f)) or ''
                 m = re.search(r'^(?:VERSION|__version__)\s*=\s*["\']([^"\']+)["\']',
@@ -458,7 +459,18 @@ def _wrap(text, width):
     return out
 
 
+def _utf8_stdio():
+    # Windows pipes/consoles default to cp1252, which cannot encode the
+    # report's arrows and dashes (UnicodeEncodeError). Force UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError):
+            pass
+
+
 def main():
+    _utf8_stdio()
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--repo', default='.', help='repository root (default: cwd)')

@@ -32,6 +32,14 @@ Update later:
 /plugin marketplace update chameleon-labs
 ```
 
+## Platform support
+
+The bundled plugins run on Linux, macOS (Intel and Apple silicon), and native Windows. CI tests all three.
+
+- **Windows:** skills run their scripts in Git Bash, the Bash tool that Claude Code uses on Windows. Python tools use `python` when `python3` is missing. `scan-source` is the exception: its scanners are Linux tools, so on Windows it runs them inside WSL.
+- **macOS:** the scripts run under the stock `/bin/bash` 3.2 and do not need GNU coreutils. `scan-source`'s installer needs `brew install pipx jq`.
+- **Line endings:** `.gitattributes` keeps every script LF, even on a Windows clone with `core.autocrlf=true`. If you installed before this fix and see `$'\r': command not found`, run `/plugin marketplace update chameleon-labs` and update the plugin.
+
 ## Available plugins
 
 | Plugin | Description | Source |

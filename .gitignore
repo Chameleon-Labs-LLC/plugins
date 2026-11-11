@@ -3,3 +3,5 @@
 .vscode/
 __pycache__/
 *.pyc
+# Private plugin kept beside this public repo; not published
+chameleon-agents

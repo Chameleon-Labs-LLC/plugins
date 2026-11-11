@@ -41,9 +41,33 @@ the user and tell them what actually matters.
 
 ## Workflow
 
-Paths below are relative to this skill directory. Use `${CLAUDE_PLUGIN_ROOT}` when
-it is set (plugin context); otherwise resolve relative to this `SKILL.md`. The
-scanner lives at `scripts/scan-download`.
+Paths below are relative to **this skill directory** (`SKILL_DIR`), not the plugin
+root. Resolve `SKILL_DIR` in this order:
+
+1. The "Base directory for this skill" path that the harness shows above this file.
+2. `${CLAUDE_PLUGIN_ROOT}/skills/scan-source`. `CLAUDE_PLUGIN_ROOT` is the plugin
+   root, one level above `skills/`. `${CLAUDE_PLUGIN_ROOT}/scripts` does not exist.
+3. The directory that contains this `SKILL.md`.
+
+The scanner is `$SKILL_DIR/scripts/scan-download`. The installer is
+`$SKILL_DIR/scripts/install-security-scanners.sh`.
+
+**Native Windows:** the scanners are Linux tools. Run every command in this skill
+inside WSL through `wsl.exe -e bash -lc '<command>'`. Convert each path to its WSL
+form: `C:\Users\x\...` becomes `/mnt/c/Users/x/...`. Do not check for the tools in
+Git Bash, because they are installed only in WSL. Both scripts exit with code 2
+and print the WSL command if they are started from Git Bash.
+
+**macOS:** the scripts run under the stock `/bin/bash` 3.2 and do not need GNU
+`timeout`. The installer needs `curl`, `jq`, and `pipx` (`brew install pipx jq`)
+and downloads the `darwin`/`macOS` builds of osv-scanner and trivy for the Mac's
+CPU (Intel or Apple silicon).
+
+**CRLF error:** `$'\r': command not found` or `set: pipefail: invalid option name`
+means that a Windows git clone with `core.autocrlf=true` converted the scripts to
+CRLF. The repo's `.gitattributes` prevents this on new clones. For an old clone, run
+an LF copy from your scratchpad: `tr -d '\r' < "$SKILL_DIR/scripts/scan-download" >
+<scratchpad>/scan-download`. Do not edit the plugin cache.
 
 ### 1. Identify the target
 
@@ -66,7 +90,7 @@ If any are missing, run the bundled installer (no `sudo`; pipx + two static
 binaries into `~/.local/bin`):
 
 ```bash
-bash scripts/install-security-scanners.sh
+bash "$SKILL_DIR/scripts/install-security-scanners.sh"
 ```
 
 Tell the user this installs `guarddog`, `semgrep`, `pip-audit` via pipx and
@@ -77,11 +101,11 @@ high-profile tools (well past any reasonable minimum-package-age threshold).
 ### 3. Run the scan
 
 ```bash
-bash scripts/scan-download "<absolute-target-path>"
+bash "$SKILL_DIR/scripts/scan-download" "<absolute-target-path>"
 ```
 
 Useful flags: `--quick` skips the slower Semgrep SAST pass;
-`SEMGREP_TIMEOUT=900 bash scripts/scan-download <path>` raises the Semgrep timeout.
+`SEMGREP_TIMEOUT=900 bash "$SKILL_DIR/scripts/scan-download" <path>` raises the Semgrep timeout.
 A full combined log is written to `<target>/.scan-reports/scan-<timestamp>.log`.
 Exit code `0` = nothing flagged, `1` = findings present (this is normal and
 expected, not an error), `2` = usage error.
@@ -114,6 +138,9 @@ use, while 1 GuardDog indicator can be the thing that matters. Read
 ```
 # Security scan: <repo>
 
+Scanned: <absolute-target-path> on <YYYY-MM-DD>
+Raw log: .scan-reports/scan-<timestamp>.log
+
 ## Verdict: <SAFE TO USE | REVIEW BEFORE USING | DO NOT RUN>
 One-sentence justification.
 
@@ -127,6 +154,7 @@ Note explicitly which GuardDog hits are benign false positives and why.
 
 ## Recommended fixes
 Concrete commands (see references/interpreting-results.md for per-ecosystem fixes).
+Fix script: .scan-reports/scan-<timestamp>-fix.sh  (or "none generated — no actual vulns")
 
 ## Caveats
 - Clean ≠ proof of safety; what was scanned (git clone vs published artifact);
@@ -137,6 +165,151 @@ Set the verdict honestly: **DO NOT RUN** only for credible malware (real GuardDo
 indicators that survive scrutiny, or Semgrep secret/backdoor hits in first-party
 code). Outdated dependencies with known CVEs are **REVIEW BEFORE USING**, not a
 malware verdict.
+
+### 7. Save the report beside the log (always)
+
+After presenting the report in chat, **always** write the same content to a markdown
+file next to the raw log, so the interpretation is preserved with the scan it
+describes. Use the log's own timestamp so the report sorts directly beside it:
+
+```
+<target>/.scan-reports/scan-<timestamp>-report.md
+```
+
+e.g. log `scan-2026-06-21_094935.log` → report `scan-2026-06-21_094935-report.md`.
+This is not optional and not a separate "do you want me to save it?" step — the saved
+report is part of the deliverable (and matches the house rule about writing a summary
+file when finishing a substantial task). Tell the user the path you wrote it to.
+
+### 8. Generate the fix script beside the report
+
+If — and only if — the report contains at least one **actual vulnerability** (a
+real CVE/advisory in a dependency, confirmed non-false-positive), write an
+executable fix script next to the report and `chmod +x` it:
+
+```
+<target>/.scan-reports/scan-<timestamp>-fix.sh
+```
+
+The script is the "Recommended fixes" section made runnable. It never runs
+automatically — the user reviews it and runs it themselves. Rules for its content:
+
+- **One step per actual vuln (or per-lockfile group of vulns) with a viable fix**
+  — the concrete ecosystem command (`cargo update -p … --precise …`,
+  `pnpm up …`, an override edit, etc.), exactly as recommended in the report.
+- **An actual vuln with no viable automatic fix** (Fixed Version `--`, abandoned
+  package, or a transitive dep whose fix needs an upstream semver-major bump)
+  gets **no fix command — never invent one**. Instead the script reports an
+  error in that step: print `ERROR: <vuln> — <why it cannot be auto-fixed and
+  what to do instead>` to stderr and count it as a failure, so the script exits
+  non-zero even when every runnable step succeeds.
+- **Nothing else goes in the script**: no false positives, no unmaintained-crate
+  informational notices, no Docker/Helm best-practice nits, no allowlist edits.
+- Steps must keep going after a failure (no `set -e`); track failures and exit
+  `1` if any step failed or any vuln was unfixable, `0` only when everything
+  was fixed.
+- End by reminding the user to re-run the scan to confirm, and honor the 7-day
+  minimum-package-age rule on any bump the script performs.
+
+Skeleton (adapt paths and steps to the actual findings):
+
+```bash
+#!/usr/bin/env bash
+# Generated by scan-source from scan-<timestamp>-report.md — REVIEW BEFORE RUNNING.
+TARGET="<absolute-target-path>"
+FAILURES=0
+
+step() {  # step "<description>" <command...>
+  local desc="$1"; shift
+  echo "==> $desc"
+  if "$@"; then echo "    OK"; else echo "    FAILED: $desc" >&2; FAILURES=$((FAILURES+1)); fi
+}
+
+unfixable() {  # unfixable "<vuln>" "<why + what to do instead>"
+  echo "ERROR: $1 — $2" >&2
+  FAILURES=$((FAILURES+1))
+}
+
+step "nostr 0.44.6 -> 0.44.7 (RUSTSEC-2026-0225..0230)" \
+  cargo update -p nostr --precise 0.44.7 --manifest-path "$TARGET/Cargo.toml"
+unfixable "quick-xml 0.38.4 (RUSTSEC-2026-0194/0195, HIGH)" \
+  "fix is a semver-major of a transitive dep; parent crates must bump — track upstream"
+
+echo
+if [ "$FAILURES" -gt 0 ]; then
+  echo "$FAILURES step(s) failed or need manual action" >&2
+  exit 1
+fi
+echo "All fixes applied — re-run the scan to confirm the counts drop"
+```
+
+If the report has **no actual vulns** (clean, or only false positives /
+informational notices), do not create the script — state "no fix script
+generated — no actual vulns" in the report's Recommended fixes section instead.
+Tell the user the script path (or that none was needed) alongside the report path.
+
+### 9. Prepare a minimal share draft (always)
+
+Raw scanner output can contain credentials, proprietary source excerpts, private
+URLs, and identifiers. The local report and fix script can repeat these details.
+Path/username replacement and a successful grep are **not** sufficient redaction.
+Keep the originals private in `.scan-reports/` for diagnosis.
+
+Do not copy the raw log, private report, or fix script into share output. Create a
+fresh draft that reads none of them, using the bundled stdlib-only helper:
+
+```bash
+python3 "$SKILL_DIR/scripts/prepare-share.py" \
+  --output-dir "<target>/.scan-reports/share/scan-<timestamp>"
+```
+
+Use the log's timestamp. The helper creates only `report.md` and refuses an
+existing output directory. Choose a fresh suffix on reruns; do not reuse old
+exports. Prior files under `share/` are unreviewed legacy artifacts: never attach
+or archive the whole directory, and do not delete the user's old files.
+
+Fill the draft with only reviewed public facts: public advisory identifiers,
+public package/version details, aggregate layer outcomes (including errors and
+skips), and general remediation. Keep the generic reproduction instructions and
+record reviewed scan flags. Do not paste scanner text or source excerpts. Omit
+credentials, private package/repository names, private URLs, usernames, local
+paths, and confidential details even when they occur in benign findings or fix
+commands. If uncertain whether a detail is public, omit it.
+
+Review the **entire final draft**, including any links and reproduction details,
+for sensitive content. Searches for known planted/observed secrets and local
+identifiers can supplement this review but cannot prove arbitrary text safe.
+Tell the user the exact draft path and that raw evidence/fix scripts remain local.
+Any separately requested evidence export needs its own content review; never
+include it automatically. Sending, uploading, or filing **any** artifact requires
+explicit approval of the exact content and destination. Preparing a local draft
+is not approval to share it.
+
+### 10. Offer to file an upstream issue (if the project allows it)
+
+When the scan found **actual vulnerabilities that upstream should fix** (an
+outdated lockfile, dependency bumps, a no-fix dep worth replacing), the
+highest-leverage outcome is an upstream report. Do not skip this step — but
+never file without asking.
+
+1. **Check the project's rules first.** Read `CONTRIBUTING.md`, `SECURITY.md`,
+   and `.github/ISSUE_TEMPLATE/` in the target repo, and confirm issues are
+   enabled (`gh repo view <owner>/<repo> --json hasIssuesEnabled`). If
+   contributing docs forbid unsolicited issues or the tracker is disabled, tell
+   the user and stop here.
+2. **Route by finding type.** Credible malware or an exploitable first-party
+   vulnerability must **never** go in a public issue — follow the repo's
+   `SECURITY.md` private-disclosure process instead (or advise the user to).
+   Dependency-freshness/CVE reports are fine as public issues.
+3. **Check for duplicates** (`gh issue list --search`, plus recent git history)
+   before proposing anything.
+4. **Ask the user** (AskUserQuestion) whether to submit, showing which repo,
+   what the issue will say, and any template/conventions the repo requires
+   (e.g. an agent-attribution line if the repo's docs mandate one). Filing an
+   issue is outward-facing — it needs explicit consent every time.
+5. On yes: file with `gh issue create`, drawing the body from the **reviewed
+   share draft** (step 9), never from the private originals or raw logs. Give the user
+   the issue URL.
 
 ## Allowlisting known-benign GuardDog hits
 
