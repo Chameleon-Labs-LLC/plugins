@@ -98,6 +98,74 @@ def test_empty_package_json_is_skipped_not_filled(tmp_path):
     assert any("empty stub" in n for n in notes)
 
 
+MARKETPLACE = """{
+  "name": "example-marketplace",
+  "owner": { "name": "Example" },
+  "metadata": {
+    "description": "catalog of plugins",
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "example-plugin",
+      "source": "./",
+      "skills": ["./claude/skills/version-manager"],
+      "description": "one plugin",
+      "version": "0.3.0"
+    }
+  ]
+}
+"""
+
+
+def test_marketplace_plugin_version_is_detected(tmp_path):
+    """.claude_code: the only version home is the plugin entry in
+    .claude-plugin/marketplace.json — metadata.version is the catalog's own
+    series and must not be picked (or later overwritten) as the repo version."""
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {".claude-plugin/marketplace.json": MARKETPLACE})
+    canonical, mirrors, notes = vt.detect(repo)
+    assert canonical is not None
+    assert canonical.path == Path(".claude-plugin/marketplace.json")
+    assert canonical.kind == "marketplace"
+    assert canonical.value == "0.3.0"
+    assert not mirrors
+    assert any("metadata.version" in n for n in notes)
+
+
+def test_marketplace_with_many_plugins_is_noted_not_tracked(tmp_path):
+    """Chameleon-Labs-LLC/plugins: seven plugins, each with its own version —
+    no single repo version exists, so the tool must not pick plugins[0]."""
+    repo = new_repo(tmp_path)
+    market = json.loads(MARKETPLACE)
+    market["plugins"].append(dict(market["plugins"][0],
+                                  name="second-plugin", version="1.4.0"))
+    commit(repo, "init",
+           {".claude-plugin/marketplace.json": json.dumps(market, indent=2)})
+    canonical, _mirrors, notes = vt.detect(repo)
+    assert canonical is None
+    assert any("2 plugins" in n for n in notes)
+
+
+def test_release_bumps_marketplace_plugin_not_metadata(tmp_path):
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {
+        ".claude-plugin/marketplace.json": MARKETPLACE,
+        "CHANGELOG.md": CHANGELOG.format(v="0.3.0", d="2026-08-01"),
+    }, when="2026-08-01T10:00:00")
+    commit(repo, "feat: new skill", when="2026-08-06T10:00:00")
+
+    assert vt.main(["--repo", str(repo), "release", "minor", "--apply"]) == 0
+
+    text = (repo / ".claude-plugin/marketplace.json").read_text()
+    data = json.loads(text)
+    assert data["plugins"][0]["version"] == "0.4.0"
+    assert data["metadata"]["version"] == "0.2.0", "metadata.version overwritten"
+    assert '"description": "catalog of plugins"' in text, "file was reserialised"
+    assert "## [0.4.0]" in (repo / "CHANGELOG.md").read_text()
+    assert "v0.4.0" in vt.existing_tags(repo)
+
+
 def test_version_file_with_trailing_comments_is_detected(tmp_path):
     """A Python service's VERSION has explanatory comments under the number;
     requiring a bare file left it undetected and it would go stale."""

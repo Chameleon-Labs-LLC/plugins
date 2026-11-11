@@ -9,7 +9,7 @@ per-repository config file. Every verb is read-only until it prints its plan;
     version_tool.py check    [--repo PATH]
     version_tool.py backfill [--repo PATH] [--apply] [--fix-dates]
     version_tool.py release  <major|minor|patch> [--repo PATH] [--apply]
-                             [--notes FILE]
+                             [--notes FILE] [--no-tag]
 """
 from __future__ import annotations
 
@@ -53,7 +53,10 @@ def is_repo(repo: Path) -> bool:
 
 
 def is_dirty(repo: Path) -> bool:
-    return bool(git(repo, "status", "--porcelain").strip())
+    # untracked files inside a submodule are not this repo's dirt; a changed
+    # submodule pointer or modified content still counts
+    return bool(git(repo, "status", "--porcelain",
+                    "--ignore-submodules=untracked").strip())
 
 
 def existing_tags(repo: Path) -> set[str]:
@@ -110,6 +113,17 @@ PATTERNS: dict[str, re.Pattern[str]] = {
         r"(?P<pre>\A[ \t]*)(?P<v>\d+\.\d+\.\d+)(?P<post>[ \t]*(?:\r?\n|\Z))"),
     "readme": re.compile(
         r"(?P<pre>\*\*Version\s+)(?P<v>\d+\.\d+\.\d+)(?P<post>\*\*)"),
+    # .NET SDK-style project: <Version> is canonical; write_version also syncs
+    # the 4-part <AssemblyVersion>/<FileVersion> siblings when present.
+    "csproj": re.compile(
+        r"(?P<pre><Version>\s*)(?P<v>\d+\.\d+\.\d+)(?P<post>\s*</Version>)"),
+    # Claude Code plugin marketplace: the repo version lives on the single
+    # plugin entry, NOT metadata.version (the catalog's own series). First
+    # "version" key after the plugins array opens is plugins[0]'s — detect()
+    # verifies that against parsed JSON before trusting this pattern.
+    "marketplace": re.compile(
+        r"(?P<pre>\"plugins\"[\s\S]*?\"version\"\s*:\s*\")"
+        r"(?P<v>\d+\.\d+\.\d+)(?P<post>\")"),
 }
 
 # Some projects' own files name their canonical source; reading it beats
@@ -136,7 +150,8 @@ def _pointer_target(text: str) -> str | None:
 # a Next.js app release.
 SKIP_DIRS = {".git", ".venv", ".venv_linux", "node_modules", "__pycache__",
              "dist", "build", ".next", "venv", "site-packages",
-             "generated", "vendor", ".prisma", "out", "coverage", "target"}
+             "generated", "vendor", ".prisma", "out", "coverage", "target",
+             "obj", "bin"}
 
 MAX_DEPTH = 3   # project version files live near the root; deeper is vendored
 
@@ -160,6 +175,22 @@ def _read(repo: Path, rel: Path) -> str | None:
         return None
 
 
+def _write(path: Path, text: str) -> None:
+    """Write text keeping the file's existing line endings.
+
+    Path.write_text translates newlines to os.linesep, so on native Windows a
+    bump would rewrite an LF file as CRLF from end to end.
+    """
+    newline = "\n"
+    try:
+        if b"\r\n" in path.read_bytes():
+            newline = "\r\n"
+    except OSError:
+        pass
+    with open(path, "w", encoding="utf-8", newline=newline) as fh:
+        fh.write(text)
+
+
 def _extract(text: str, kind: str) -> str | None:
     m = PATTERNS[kind].search(text)
     return m.group("v") if m else None
@@ -178,7 +209,9 @@ def _candidate_files(repo: Path) -> list[tuple[Path, str]]:
     for name, kind in (("pyproject.toml", "pyproject"),
                        ("package.json", "package_json"),
                        ("VERSION", "version_file"),
-                       ("README.md", "readme")):
+                       ("README.md", "readme"),
+                       # dot-dir, so the pruned walk below never reaches it
+                       (".claude-plugin/marketplace.json", "marketplace")):
         if (repo / name).exists():
             out.append((Path(name), kind))
 
@@ -191,6 +224,9 @@ def _candidate_files(repo: Path) -> list[tuple[Path, str]]:
             if name in MODULE_FILES:
                 out.append((rel_root / name if rel_root.parts else Path(name),
                             "py_const"))
+            elif name.endswith(".csproj"):
+                out.append((rel_root / name if rel_root.parts else Path(name),
+                            "csproj"))
     return out
 
 
@@ -213,6 +249,27 @@ def detect(repo: Path) -> tuple[Location | None, list[Location], list[str]]:
             except json.JSONDecodeError:
                 notes.append(f"{rel}: unparseable, skipped")
                 continue
+        if kind == "marketplace":
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                notes.append(f"{rel}: unparseable, skipped")
+                continue
+            plugins = data.get("plugins") or []
+            if len(plugins) != 1:
+                notes.append(f"{rel}: {len(plugins)} plugins — per-plugin "
+                             "versions, no single repo version; skipped")
+                continue
+            declared = str(plugins[0].get("version") or "") \
+                if isinstance(plugins[0], dict) else ""
+            if parse_version(declared) is None or \
+                    _extract(text, kind) != declared:
+                notes.append(f"{rel}: plugin version missing or pattern "
+                             "mismatch; skipped")
+                continue
+            if (data.get("metadata") or {}).get("version"):
+                notes.append(f"{rel}: metadata.version is the catalog's own "
+                             "series — left unmanaged")
         value = _extract(text, kind)
         if value is None:
             continue
@@ -237,7 +294,8 @@ def detect(repo: Path) -> tuple[Location | None, list[Location], list[str]]:
             return 0
         if loc.mirror_only:
             return 90
-        return {"pyproject": 10, "package_json": 11,
+        return {"pyproject": 10, "package_json": 11, "marketplace": 12,
+                "csproj": 13,
                 "py_const": 20, "version_file": 30}.get(loc.kind, 50)
 
     real = [loc for loc in found if not loc.mirror_only]
@@ -259,7 +317,13 @@ def write_version(repo: Path, loc: Location, new: str) -> None:
         raise GitError(f"no version pattern in {loc.path}")
     updated = pattern.sub(lambda m: m.group("pre") + new + m.group("post"),
                           text, count=1)
-    (repo / loc.path).write_text(updated, encoding="utf-8")
+    if loc.kind == "csproj":
+        # Keep the 4-part assembly metadata in step with <Version>.
+        for tag in ("AssemblyVersion", "FileVersion"):
+            updated = re.sub(
+                rf"(<{tag}>\s*)\d+\.\d+\.\d+(?:\.\d+)?(\s*</{tag}>)",
+                rf"\g<1>{new}.0\g<2>", updated, count=1)
+    _write(repo / loc.path, updated)
 
 
 # --------------------------------------------------------------------------
@@ -290,7 +354,7 @@ def _history_paths(repo: Path, canonical: Location | None) -> list[Path]:
         if not line:
             continue
         p = Path(line)
-        if (p.name in names
+        if ((p.name in names or p.suffix == ".csproj")
                 and not any(d in p.parts for d in SKIP_DIRS)
                 and len(p.parts) <= MAX_DEPTH):
             paths.append(p)
@@ -306,6 +370,8 @@ def _kind_for(path: Path) -> str:
         return "package_json"
     if path.name == "VERSION":
         return "version_file"
+    if path.suffix == ".csproj":
+        return "csproj"
     return "py_const"
 
 
@@ -593,7 +659,7 @@ def insert_section(repo: Path, version: str, when: str, body: str) -> None:
             updated = text[:m.start()] + section.lstrip("\n") + "\n" + text[m.start():]
         else:
             updated = text.rstrip() + "\n" + section
-    (repo / rel).write_text(updated, encoding="utf-8")
+    _write(repo / rel, updated)
 
 
 def fix_changelog_date(repo: Path, version: str, when: str) -> bool:
@@ -605,7 +671,7 @@ def fix_changelog_date(repo: Path, version: str, when: str) -> bool:
                          re.M)
     if not pattern.search(text):
         return False
-    (repo / rel).write_text(pattern.sub(rf"\1 - {when}", text), encoding="utf-8")
+    _write(repo / rel, pattern.sub(rf"\1 - {when}", text))
     return True
 
 
@@ -710,7 +776,7 @@ def cmd_backfill(repo: Path, apply: bool = False, fix_dates: bool = False,
         if canonical is None:
             canonical = Location(Path("VERSION"), "version_file", None)
             if not (repo / "VERSION").exists() and apply:
-                (repo / "VERSION").write_text(head + "\n", encoding="utf-8")
+                _write(repo / "VERSION", head + "\n")
         elif apply:
             write_version(repo, canonical, head)
             for m in mirrors:
@@ -774,7 +840,8 @@ def _subjects_for(repo: Path, rec: Reconciliation, version: str) -> list[str]:
 
 
 def cmd_release(repo: Path, level: str, apply: bool = False,
-                notes: str | None = None, **_: object) -> int:
+                notes: str | None = None, no_tag: bool = False,
+                **_: object) -> int:
     _header(repo)
     if is_dirty(repo):
         print("  REFUSED: working tree is dirty — commit or stash first")
@@ -827,7 +894,8 @@ def cmd_release(repo: Path, level: str, apply: bool = False,
     for t in targets:
         print(f"  - set {t.label} = {new}")
     print(f"  - insert changelog [{new}] - {date.today()}")
-    print(f"  - commit and tag {tag}")
+    print("  - commit" + (" (tag deferred: the lander tags the merge commit)"
+                          if no_tag else f" and tag {tag}"))
 
     if not apply:
         return 0
@@ -837,8 +905,9 @@ def cmd_release(repo: Path, level: str, apply: bool = False,
     insert_section(repo, new, str(date.today()), body)
     git(repo, "add", "-A")
     git(repo, "commit", "-m", f"chore(release): {tag}")
-    git(repo, "tag", "-a", tag, "-m", f"Version {new}")
-    print(f"\nreleased {tag}")
+    if not no_tag:
+        git(repo, "tag", "-a", tag, "-m", f"Version {new}")
+    print(f"\nreleased {tag}" + (" (untagged)" if no_tag else ""))
     return 0
 
 
@@ -860,6 +929,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("level", choices=["major", "minor", "patch"])
     r.add_argument("--apply", action="store_true")
     r.add_argument("--notes", help="file holding the curated changelog body")
+    r.add_argument("--no-tag", action="store_true",
+                   help="commit the bump but leave tagging to the lander, "
+                        "which tags the merge commit once the PR has merged")
 
     args = ap.parse_args(argv)
     repo = Path(args.repo).resolve()
