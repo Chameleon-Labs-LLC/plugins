@@ -235,6 +235,9 @@ jobs:
       # --no-exit-codes: exit 0 means the scan ran, anything else is a scanner
       # error; the JSON decides whether there are findings.
       - name: zizmor (known-vulnerable, impostor and unpinned actions)
+        # Explicit, so a workflow-level `defaults.run.working-directory` cannot
+        # point the scan at a clean subdirectory.
+        working-directory: ${{ github.workspace }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -304,6 +307,7 @@ jobs:
       # when the zizmor step failed, so both results show.
       - name: Every action SHA pin is a tagged release
         if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}  # see the zizmor step
         env:
           # Read-only job token, so the tag lookup also works for this
           # repository's own reusable workflows when it is private. Passed to
@@ -371,7 +375,16 @@ jobs:
                       sys.exit(1)
               for n in names:
                   p = os.path.join(root, n)[2:]
-                  in_wf = p.replace(os.sep, "/").startswith(".github/workflows/") and n.endswith((".yml", ".yaml"))
+                  low = n.lower()
+                  in_wf_dir = p.replace(os.sep, "/").startswith(".github/workflows/")
+                  if (low in ("action.yml", "action.yaml") and n not in ("action.yml", "action.yaml")) \
+                          or (in_wf_dir and low.endswith((".yml", ".yaml")) and not n.endswith((".yml", ".yaml"))):
+                      # A Windows or macOS runner finds `Action.yml` for
+                      # `uses: ./dir`, but neither this step nor zizmor
+                      # collects a name that is not all lowercase: fail closed.
+                      print(f"::error file={prop(p)},title=action pins::{esc(p)} is a workflow or action manifest whose name is not lowercase; rename it so it can be checked")
+                      sys.exit(1)
+                  in_wf = in_wf_dir and n.endswith((".yml", ".yaml"))
                   if not (in_wf or n in ("action.yml", "action.yaml")):
                       continue
                   if os.path.islink(p):
