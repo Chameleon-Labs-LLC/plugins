@@ -225,6 +225,11 @@ jobs:
       # it could add a zizmor.yml that disables an audit, or a
       # `# zizmor: ignore[...]` comment. Neither is honoured.
       # --collect=all: also audit workflows a PR hides with .gitignore.
+      # --ignore-lockfile: zizmor skips `unpinned-uses` for any workflow listed
+      # in .github/workflows/actions.lock, while `known-vulnerable-actions`
+      # still reads the `uses:` ref, not the locked commit the runner checks
+      # out. (Hidden, experimental flag in 1.32.0: if a later version drops it,
+      # zizmor exits non-zero and the step fails as a scanner error.)
       # --strict-collection: a collected file zizmor cannot parse fails the
       # scan instead of being skipped with a warning.
       # --no-exit-codes: exit 0 means the scan ran, anything else is a scanner
@@ -248,7 +253,8 @@ jobs:
           out="$RUNNER_TEMP/zizmor.json"
           rc=0
           zizmor --format json --no-progress --no-exit-codes --strict-collection \
-            --no-config --no-ignores --collect=all --gh-hostname github.com . > "$out" || rc=$?
+            --no-config --no-ignores --collect=all --ignore-lockfile \
+            --gh-hostname github.com . > "$out" || rc=$?
           if [ "$rc" -ne 0 ]; then
             echo "::error title=zizmor::scanner error, exit $rc (not a findings result)"
             exit 2
@@ -322,11 +328,15 @@ jobs:
           def uses_values(doc):
               # Only the keys that select an action or reusable workflow:
               # jobs.<id>.uses, jobs.<id>.steps[*].uses, and runs.steps[*].uses
-              # in an action.yml. A `uses` inside a step's `with:` is an input.
+              # in an action.yml, plus the steps of a `parallel:` group at any
+              # depth. A `uses` inside a step's `with:` is an input.
               def step_uses(steps):
                   for s in steps if isinstance(steps, list) else []:
-                      if isinstance(s, dict) and isinstance(s.get("uses"), str):
+                      if not isinstance(s, dict):
+                          continue
+                      if isinstance(s.get("uses"), str):
                           yield s["uses"].strip()
+                      yield from step_uses(s.get("parallel"))
               if not isinstance(doc, dict):
                   return
               jobs = doc.get("jobs")
@@ -339,6 +349,14 @@ jobs:
               if isinstance(runs, dict):
                   yield from step_uses(runs.get("steps"))
 
+          # With .github/workflows/actions.lock the runner checks out the
+          # LOCKED commit of each action, which neither this step nor zizmor's
+          # advisory audit reads (both check the `uses:` ref). Fail closed until
+          # this check audits locked commits.
+          lockfile = ".github/workflows/actions.lock"
+          if os.path.lexists(lockfile):
+              print(f"::error file={prop(lockfile)},title=action pins::{lockfile} is a workflow lockfile. The runner executes its locked commits, which this check and zizmor's advisory audit do not read, so the lockfile is not supported here.")
+              sys.exit(1)
           files = []
           for root, dirs, names in os.walk(".", followlinks=False):
               dirs[:] = [d for d in dirs if d != ".git"]
@@ -366,7 +384,11 @@ jobs:
           uppercase = []  # (file, uses value) pinned with uppercase hex
           for p in sorted(files):
               try:
-                  res = subprocess.run(["yq", "-o=json", "-I=0", "explode(.)", p],
+                  # "./" + p: a PR-controlled directory named like an option
+                  # (`--foo=x/action.yml`) must reach yq as a file, not a flag.
+                  # stdin is closed so yq can never parse it instead.
+                  res = subprocess.run(["yq", "-o=json", "-I=0", "explode(.)", "./" + p],
+                                       stdin=subprocess.DEVNULL,
                                        capture_output=True, text=True, timeout=60)
               except (subprocess.SubprocessError, OSError) as exc:
                   print(f"::error title=action pins::scanner error: cannot run yq on {esc(p)} ({esc(exc)}); not a findings result")
