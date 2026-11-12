@@ -238,10 +238,17 @@ jobs:
             echo "::error title=zizmor::scanner error: no GitHub token, so the advisory lookup cannot run (not a findings result)"
             exit 2
           fi
+          # zizmor also reads switches from the environment, and a workflow-
+          # or job-level `env:` reaches this step: ZIZMOR_OFFLINE or
+          # ZIZMOR_NO_ONLINE_AUDITS would skip the advisory and impostor
+          # audits while the job stays green, and GH_HOST would send the token
+          # to another host. Unset them, keep only the job token, and name the
+          # host on the command line (it outranks the environment).
+          unset ZIZMOR_OFFLINE ZIZMOR_NO_ONLINE_AUDITS GITHUB_TOKEN ZIZMOR_GITHUB_TOKEN
           out="$RUNNER_TEMP/zizmor.json"
           rc=0
           zizmor --format json --no-progress --no-exit-codes --strict-collection \
-            --no-config --no-ignores --collect=all . > "$out" || rc=$?
+            --no-config --no-ignores --collect=all --gh-hostname github.com . > "$out" || rc=$?
           if [ "$rc" -ne 0 ]; then
             echo "::error title=zizmor::scanner error, exit $rc (not a findings result)"
             exit 2
@@ -352,6 +359,7 @@ jobs:
                       sys.exit(1)
                   files.append(p)
           pins = {}  # (owner, repo, sha, subpath) -> [file]; subpath is "" for a root action
+          uppercase = []  # (file, uses value) pinned with uppercase hex
           for p in sorted(files):
               try:
                   res = subprocess.run(["yq", "-o=json", "-I=0", "explode(.)", p],
@@ -376,6 +384,11 @@ jobs:
                       name, ref = value.rsplit("@", 1)
                       if name.startswith(("./", "docker://")) or not re.fullmatch(r"[0-9a-fA-F]{40}", ref):
                           continue  # local, container, or not a SHA (zizmor gates unpinned refs)
+                      if ref != ref.lower():
+                          # zizmor 1.32.0 compares a SHA pin with tag commits
+                          # case-sensitively, so an uppercase pin matches no
+                          # tag and no advisory is ever looked up for it.
+                          uppercase.append((p, value))
                       ref = ref.lower()  # git ls-remote prints lowercase object IDs
                       parts = name.split("/")
                       if len(parts) < 2:
@@ -394,6 +407,9 @@ jobs:
                               "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}"})
           tags = {}
           bad = 0
+          for p, value in uppercase:
+              bad += 1
+              print(f"::error file={esc(p)},title=action pins::{esc(value)} is pinned with uppercase hex. zizmor matches a pin to its release tag case-sensitively, so no advisory can be matched to it. Pin the lowercase SHA.")
           for (owner, repo, sha, subpath), where in sorted(pins.items()):
               key = (owner, repo)
               if key not in tags:
@@ -452,6 +468,6 @@ jobs:
                   for p in where:
                       bad += 1
                       print(f"::error file={esc(p)},title=action pins::{esc(owner)}/{esc(repo)}@{sha} is not a release-tagged commit of {esc(owner)}/{esc(repo)} (no tag, or the tag zizmor would query is not a plain version such as v1.2.3), so no advisory can be matched to it. Pin the SHA of a released version.")
-          print(f"action pins: {len(pins)} distinct SHA pins checked, {bad} not a tagged release")
+          print(f"action pins: {len(pins)} distinct SHA pins checked, {bad} rejected (uppercase hex or not a tagged release)")
           sys.exit(1 if bad else 0)
           PY
