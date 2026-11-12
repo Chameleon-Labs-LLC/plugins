@@ -5,10 +5,10 @@
 #   - Actions are pinned to commit SHAs. GitHub raises no Dependabot alerts for
 #     SHA pins, so no security-update PR can ever fire for an action: the
 #     weekly VERSION update below is the only remediation path, and advisory
-#     DETECTION comes from the osv-scanner job in security.yml.
+#     DETECTION comes from the zizmor job in security.yml.
 #   - cooldown mirrors a 7-day minimum package age, a supply-chain defense
-#     against a freshly published malicious release. When osv-scanner reports
-#     a vulnerable action, bump the pin by hand instead of waiting.
+#     against a freshly published malicious release. When zizmor reports a
+#     vulnerable action, bump the pin by hand instead of waiting.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -36,4 +36,6 @@ updates:
     # so no security update can ever fire for a pinned action. A weekly
     # VERSION update is therefore the only remediation path that exists, and
     # ignoring majors would remove it. Advisory DETECTION comes from the
-    # `github/actions` osv-scanner plugin named in security.yml.
+    # zizmor job in security.yml (known-vulnerable-actions maps a SHA pin to
+    # its release tag). The `github/actions` osv-scanner plugin only lists
+    # these actions; it detected no advisory in our tests.

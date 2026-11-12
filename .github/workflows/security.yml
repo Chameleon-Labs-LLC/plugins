@@ -159,11 +159,14 @@ jobs:
           # GitHub runs this under `bash -e`: capture the exit code instead of
           # letting a non-zero scanner result end the step before it is classified.
           rc=0
-          # The default plugin set is `lockfile, sbom, directory` -- it does
-          # NOT read workflow `uses:` references, so SHA-pinned actions were
-          # scanned by nothing: GitHub generates Dependabot alerts only for
-          # actions on semantic versions, never for SHA pins. Naming plugins
-          # REPLACES the default list, so all four are listed here.
+          # The default plugin set is `lockfile, sbom, directory`. Naming
+          # plugins REPLACES the default list, so all four are listed.
+          # `github/actions` only INVENTORIES workflow `uses:` references: it
+          # does NOT detect advisories against them. Tested with osv-scanner
+          # 2.7.0: tj-actions/changed-files (GHSA-mrrh-fwg8-r2c3) at v44.5.7,
+          # by tag and by SHA, and actions/download-artifact v4.1.2
+          # (GHSA-cxww-7g56-2vh6) all scanned as "No issues found". The
+          # zizmor job below is the actions advisory check.
           # --no-ignore: a pull request can add .gitignore rules that hide
           # tracked manifests or workflows from a recursive scan.
           osv-scanner scan source --recursive --no-ignore \
@@ -179,3 +182,276 @@ jobs:
               echo "::error title=osv-scanner::scanner error, exit $rc (not a findings result)"
               exit "$rc" ;;
           esac
+
+  # Advisories against the actions your workflows use. Neither osv-scanner (see
+  # above) nor Dependabot covers a SHA-pinned action, so zizmor does: it maps a
+  # SHA pin to its release tag and checks that version against the GitHub
+  # Advisory Database. The job fails on three audits only, so zizmor's other
+  # (style and hardening) findings never turn a PR red:
+  #   known-vulnerable-actions  an action version with a published advisory
+  #   impostor-commit           a SHA pin that is not in the action's own repo
+  #                             (a commit from a fork, served under its name)
+  #   unpinned-uses             an action not pinned to a full commit SHA
+  # A SHA that no release tag points at cannot be mapped to a version, so no
+  # advisory could match it; the job's last step fails on such a pin.
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install zizmor 1.32.0 (digest-verified release binary)
+        # Download OUTSIDE the checkout: a PR controls the checkout and could
+        # commit a symlink named like a download target for curl to write through.
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -eu
+          V=1.32.0
+          F="zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSLO "https://github.com/zizmorcore/zizmor/releases/download/v${V}/${F}"
+          # This release publishes no checksums file, so the asset's digest
+          # (as GitHub lists it for the release) is recorded here.
+          echo "bb110cc765eca9cd7efb2e284a956be5974c60027b0970f16397d86208a9957b  ${F}" | sha256sum -c -
+          tar -xzf "${F}" zizmor
+          sudo install -m 0755 zizmor /usr/local/bin/zizmor
+          zizmor --version
+      # zizmor's online audits need a token; without one it silently runs
+      # offline and skips the advisory lookup, so a missing token is an error.
+      # The job token is read-only (`contents: read`) and is enough: the
+      # advisory database and the actions' tags are public.
+      # --no-config and --no-ignores: a pull request controls the checkout, so
+      # it could add a zizmor.yml that disables an audit, or a
+      # `# zizmor: ignore[...]` comment. Neither is honoured.
+      # --collect=all: also audit workflows a PR hides with .gitignore.
+      # --strict-collection: a collected file zizmor cannot parse fails the
+      # scan instead of being skipped with a warning.
+      # --no-exit-codes: exit 0 means the scan ran, anything else is a scanner
+      # error; the JSON decides whether there are findings.
+      - name: zizmor (known-vulnerable, impostor and unpinned actions)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error title=zizmor::scanner error: no GitHub token, so the advisory lookup cannot run (not a findings result)"
+            exit 2
+          fi
+          out="$RUNNER_TEMP/zizmor.json"
+          rc=0
+          zizmor --format json --no-progress --no-exit-codes --strict-collection \
+            --no-config --no-ignores --collect=all . > "$out" || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=zizmor::scanner error, exit $rc (not a findings result)"
+            exit 2
+          fi
+          # -I (isolated mode): the working directory is the PR's checkout, and
+          # without it a PR-added json.py would be imported in place of the
+          # standard library and could report no findings.
+          python3 -I - "$out" <<'PY'
+          import json, sys
+          GATED = {"known-vulnerable-actions", "impostor-commit", "unpinned-uses"}
+          try:
+              with open(sys.argv[1], encoding="utf-8") as fh:
+                  findings = json.load(fh)
+              if not isinstance(findings, list):
+                  raise ValueError(f"expected a list, got {type(findings).__name__}")
+          except (OSError, ValueError) as exc:
+              print(f"::error title=zizmor::scanner error: unreadable output ({exc}); not a findings result")
+              sys.exit(2)
+          def esc(s):
+              # Workflow-command escaping: the text comes from the PR's files.
+              return str(s).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          hits = 0
+          for f in findings:
+              ident = f.get("ident", "")
+              if ident not in GATED:
+                  continue
+              hits += 1
+              loc = (f.get("locations") or [{}])[0]
+              key = loc.get("symbolic", {}).get("key", {})
+              local = key.get("Local", {}) if isinstance(key, dict) else {}
+              path = local.get("given_path") or local.get("verbatim_path") or "?"
+              path = path[2:] if path.startswith("./") else path
+              row = loc.get("concrete", {}).get("location", {}).get("start_point", {}).get("row")
+              line = f",line={row + 1}" if isinstance(row, int) else ""
+              note = loc.get("symbolic", {}).get("annotation", "")
+              feature = loc.get("concrete", {}).get("feature", "").strip()
+              path = esc(path).replace(",", "%2C").replace(":", "%3A")
+              print(f"::error file={path}{line},title=zizmor {esc(ident)}::{esc(f.get('desc', ''))}: {esc(note)} ({esc(feature)})")
+          print(f"zizmor: {len(findings)} findings in total, {hits} in the gated audits")
+          sys.exit(1 if hits else 0)
+          PY
+      # known-vulnerable-actions matches advisories by release tag. A SHA pin
+      # that no tag of the action's repository points at cannot be matched to
+      # any advisory, so it would pass that audit unchecked (unpinned-uses and
+      # impostor-commit both accept it). So every SHA pin of an external action
+      # must be a commit that one of its repository's RELEASE tags points at. Runs even
+      # when the zizmor step failed, so both results show.
+      - name: Every action SHA pin is a tagged release
+        if: ${{ !cancelled() }}
+        env:
+          # Read-only job token, so the tag lookup also works for this
+          # repository's own reusable workflows when it is private. Passed to
+          # git through GIT_CONFIG_* environment variables, never argv.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # -I: see the zizmor step; the working directory is the PR's checkout.
+          # Each file is PARSED (yq, preinstalled on GitHub's Ubuntu runners,
+          # with anchors expanded) and every `uses` value anywhere in it is
+          # checked, so quoted keys, flow mappings and folded scalars cannot
+          # hide a pin the way they could from a line-based match.
+          python3 -I - <<'PY'
+          import json, os, re, subprocess, sys
+
+          def esc(s):
+              return str(s).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+          def uses_values(doc):
+              # Only the keys that select an action or reusable workflow:
+              # jobs.<id>.uses, jobs.<id>.steps[*].uses, and runs.steps[*].uses
+              # in an action.yml. A `uses` inside a step's `with:` is an input.
+              def step_uses(steps):
+                  for s in steps if isinstance(steps, list) else []:
+                      if isinstance(s, dict) and isinstance(s.get("uses"), str):
+                          yield s["uses"].strip()
+              if not isinstance(doc, dict):
+                  return
+              jobs = doc.get("jobs")
+              for job in (jobs.values() if isinstance(jobs, dict) else []):
+                  if isinstance(job, dict):
+                      if isinstance(job.get("uses"), str):
+                          yield job["uses"].strip()
+                      yield from step_uses(job.get("steps"))
+              runs = doc.get("runs")
+              if isinstance(runs, dict):
+                  yield from step_uses(runs.get("steps"))
+
+          files = []
+          for root, dirs, names in os.walk(".", followlinks=False):
+              dirs[:] = [d for d in dirs if d != ".git"]
+              for d in dirs:
+                  # os.walk does not enter a symlinked directory, so a symlinked
+                  # .github (or anything under it), or a symlinked directory
+                  # holding an action.yml, would hide manifests: fail closed.
+                  dp = os.path.join(root, d)[2:]
+                  if os.path.islink(dp) and (dp.replace(os.sep, "/").split("/")[0] == ".github"
+                                             or any(os.path.exists(os.path.join(dp, m)) for m in ("action.yml", "action.yaml"))):
+                      print(f"::error file={esc(dp)},title=action pins::{esc(dp)} is a symlinked directory; workflows and actions must be regular files to be checked")
+                      sys.exit(1)
+              for n in names:
+                  p = os.path.join(root, n)[2:]
+                  in_wf = p.replace(os.sep, "/").startswith(".github/workflows/") and n.endswith((".yml", ".yaml"))
+                  if not (in_wf or n in ("action.yml", "action.yaml")):
+                      continue
+                  if os.path.islink(p):
+                      # Not followed (it could point outside the checkout), so
+                      # its pins cannot be checked: fail closed.
+                      print(f"::error file={esc(p)},title=action pins::{esc(p)} is a symlink; workflow and action manifests must be regular files to be checked")
+                      sys.exit(1)
+                  files.append(p)
+          pins = {}  # (owner, repo, sha, subpath) -> [file]; subpath is "" for a root action
+          for p in sorted(files):
+              try:
+                  res = subprocess.run(["yq", "-o=json", "-I=0", "explode(.)", p],
+                                       capture_output=True, text=True, timeout=60)
+              except (subprocess.SubprocessError, OSError) as exc:
+                  print(f"::error title=action pins::scanner error: cannot run yq on {esc(p)} ({esc(exc)}); not a findings result")
+                  sys.exit(2)
+              if res.returncode != 0:
+                  print(f"::error file={esc(p)},title=action pins::scanner error: yq cannot parse {esc(p)} ({esc(res.stderr.strip()[:300])}); not a findings result")
+                  sys.exit(2)
+              for doc in res.stdout.splitlines():
+                  if not doc.strip():
+                      continue
+                  try:
+                      parsed = json.loads(doc)
+                  except ValueError as exc:
+                      print(f"::error file={esc(p)},title=action pins::scanner error: unreadable yq output ({esc(exc)}); not a findings result")
+                      sys.exit(2)
+                  for value in uses_values(parsed):
+                      if "@" not in value:
+                          continue
+                      name, ref = value.rsplit("@", 1)
+                      if name.startswith(("./", "docker://")) or not re.fullmatch(r"[0-9a-fA-F]{40}", ref):
+                          continue  # local, container, or not a SHA (zizmor gates unpinned refs)
+                      ref = ref.lower()  # git ls-remote prints lowercase object IDs
+                      parts = name.split("/")
+                      if len(parts) < 2:
+                          continue
+                      where = pins.setdefault((parts[0], parts[1], ref, "/".join(parts[2:])), [])
+                      if p not in where:
+                          where.append(p)
+          import base64
+          git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+          token = os.environ.get("GH_TOKEN", "")
+          if token:
+              basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+              print(f"::add-mask::{basic}")
+              git_env.update({"GIT_CONFIG_COUNT": "1",
+                              "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+                              "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}"})
+          tags = {}
+          bad = 0
+          for (owner, repo, sha, subpath), where in sorted(pins.items()):
+              key = (owner, repo)
+              if key not in tags:
+                  try:
+                      out = subprocess.run(
+                          ["git", "ls-remote", "--tags", f"https://github.com/{owner}/{repo}.git"],
+                          capture_output=True, text=True, timeout=60, check=True,
+                          env=git_env).stdout
+                  except (subprocess.SubprocessError, OSError) as exc:
+                      print(f"::error title=action pins::scanner error: cannot list the tags of {esc(owner)}/{esc(repo)} ({esc(exc)}); not a findings result")
+                      sys.exit(2)
+                  # An annotated tag prints two lines: the tag object, then the
+                  # commit it points at (`<tag>^{}`). Only commits can be pinned,
+                  # so accept the peeled commit; a lightweight tag has one line.
+                  direct, peeled = {}, {}
+                  for l in out.splitlines():
+                      fields = l.split()
+                      if len(fields) < 2:
+                          continue
+                      oid, name_ = fields[0], fields[1]
+                      if name_.endswith("^{}"):
+                          peeled[name_[:-3]] = oid
+                      else:
+                          direct[name_] = oid
+                  # zizmor queries advisories by ONE tag on the pinned commit
+                  # (chosen below), so that tag must be a release tag (v1, v1.2, 1.2.3,
+                  # v2.0.0-rc.1+build.5). A commit whose longest tag is, say,
+                  # `scratch-build` would match no version range even if it
+                  # also carries v1.2.3. Path-prefixed tags (save/v4.1.2, used
+                  # by some monorepo actions) are rejected on purpose: zizmor
+                  # sends the prefixed name to the advisory database, which
+                  # matches nothing, so such a pin would never be checked.
+                  release = re.compile(r"v?\d+(?:\.\d+){0,3}(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", re.ASCII)
+                  by_commit = {}
+                  for n_, oid in direct.items():
+                      by_commit.setdefault(peeled.get(n_, oid), []).append(n_[len("refs/tags/"):])
+                  tags[key] = by_commit
+              names = tags[key].get(sha, [])
+              # Which tag zizmor queries (zizmor 1.32.0, best_tag_for_commit):
+              # for a root action (owner/repo@sha) it prefers unprefixed tags;
+              # for a sub-action (owner/repo/path@sha) it prefers tags that
+              # start with the subpath or its last directory. Then the longest.
+              # A preferred sub-action tag is path-prefixed, which the advisory
+              # database never matches, so the release check below rejects it.
+              if not subpath:
+                  chosen = [n_ for n_ in names if "/" not in n_] or names
+              else:
+                  leaf = subpath.rsplit("/", 1)[-1]
+                  chosen = [n_ for n_ in names if n_.startswith((subpath + "/", leaf + "/"))] or names
+              # Ties: zizmor may pick any of the equally long tags, so every
+              # one of them must be a release tag.
+              # Length in UTF-8 bytes, as zizmor (Rust str::len) measures it.
+              blen = lambda s: len(s.encode("utf-8"))
+              top = max((blen(n_) for n_ in chosen), default=0)
+              if not (chosen and all(release.fullmatch(n_) for n_ in chosen if blen(n_) == top)):
+                  for p in where:
+                      bad += 1
+                      print(f"::error file={esc(p)},title=action pins::{esc(owner)}/{esc(repo)}@{sha} is not a release-tagged commit of {esc(owner)}/{esc(repo)} (no tag, or the tag zizmor would query is not a plain version such as v1.2.3), so no advisory can be matched to it. Pin the SHA of a released version.")
+          print(f"action pins: {len(pins)} distinct SHA pins checked, {bad} not a tagged release")
+          sys.exit(1 if bad else 0)
+          PY
