@@ -315,6 +315,10 @@ jobs:
           def esc(s):
               return str(s).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
+          def prop(s):
+              # An annotation property (file=) also ends at a comma or colon.
+              return esc(s).replace(",", "%2C").replace(":", "%3A")
+
           def uses_values(doc):
               # Only the keys that select an action or reusable workflow:
               # jobs.<id>.uses, jobs.<id>.steps[*].uses, and runs.steps[*].uses
@@ -345,7 +349,7 @@ jobs:
                   dp = os.path.join(root, d)[2:]
                   if os.path.islink(dp) and (dp.replace(os.sep, "/").split("/")[0] == ".github"
                                              or any(os.path.exists(os.path.join(dp, m)) for m in ("action.yml", "action.yaml"))):
-                      print(f"::error file={esc(dp)},title=action pins::{esc(dp)} is a symlinked directory; workflows and actions must be regular files to be checked")
+                      print(f"::error file={prop(dp)},title=action pins::{esc(dp)} is a symlinked directory; workflows and actions must be regular files to be checked")
                       sys.exit(1)
               for n in names:
                   p = os.path.join(root, n)[2:]
@@ -355,7 +359,7 @@ jobs:
                   if os.path.islink(p):
                       # Not followed (it could point outside the checkout), so
                       # its pins cannot be checked: fail closed.
-                      print(f"::error file={esc(p)},title=action pins::{esc(p)} is a symlink; workflow and action manifests must be regular files to be checked")
+                      print(f"::error file={prop(p)},title=action pins::{esc(p)} is a symlink; workflow and action manifests must be regular files to be checked")
                       sys.exit(1)
                   files.append(p)
           pins = {}  # (owner, repo, sha, subpath) -> [file]; subpath is "" for a root action
@@ -368,7 +372,7 @@ jobs:
                   print(f"::error title=action pins::scanner error: cannot run yq on {esc(p)} ({esc(exc)}); not a findings result")
                   sys.exit(2)
               if res.returncode != 0:
-                  print(f"::error file={esc(p)},title=action pins::scanner error: yq cannot parse {esc(p)} ({esc(res.stderr.strip()[:300])}); not a findings result")
+                  print(f"::error file={prop(p)},title=action pins::scanner error: yq cannot parse {esc(p)} ({esc(res.stderr.strip()[:300])}); not a findings result")
                   sys.exit(2)
               for doc in res.stdout.splitlines():
                   if not doc.strip():
@@ -376,7 +380,7 @@ jobs:
                   try:
                       parsed = json.loads(doc)
                   except ValueError as exc:
-                      print(f"::error file={esc(p)},title=action pins::scanner error: unreadable yq output ({esc(exc)}); not a findings result")
+                      print(f"::error file={prop(p)},title=action pins::scanner error: unreadable yq output ({esc(exc)}); not a findings result")
                       sys.exit(2)
                   for value in uses_values(parsed):
                       if "@" not in value:
@@ -406,10 +410,10 @@ jobs:
                               "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
                               "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}"})
           tags = {}
-          bad = 0
+          upper_pins, untagged = set(), set()
           for p, value in uppercase:
-              bad += 1
-              print(f"::error file={esc(p)},title=action pins::{esc(value)} is pinned with uppercase hex. zizmor matches a pin to its release tag case-sensitively, so no advisory can be matched to it. Pin the lowercase SHA.")
+              upper_pins.add(value)
+              print(f"::error file={prop(p)},title=action pins::{esc(value)} is pinned with uppercase hex. zizmor matches a pin to its release tag case-sensitively, so no advisory can be matched to it. Pin the lowercase SHA.")
           for (owner, repo, sha, subpath), where in sorted(pins.items()):
               key = (owner, repo)
               if key not in tags:
@@ -465,9 +469,9 @@ jobs:
               blen = lambda s: len(s.encode("utf-8"))
               top = max((blen(n_) for n_ in chosen), default=0)
               if not (chosen and all(release.fullmatch(n_) for n_ in chosen if blen(n_) == top)):
+                  untagged.add((owner, repo, sha, subpath))
                   for p in where:
-                      bad += 1
-                      print(f"::error file={esc(p)},title=action pins::{esc(owner)}/{esc(repo)}@{sha} is not a release-tagged commit of {esc(owner)}/{esc(repo)} (no tag, or the tag zizmor would query is not a plain version such as v1.2.3), so no advisory can be matched to it. Pin the SHA of a released version.")
-          print(f"action pins: {len(pins)} distinct SHA pins checked, {bad} rejected (uppercase hex or not a tagged release)")
-          sys.exit(1 if bad else 0)
+                      print(f"::error file={prop(p)},title=action pins::{esc(owner)}/{esc(repo)}@{sha} is not a release-tagged commit of {esc(owner)}/{esc(repo)} (no tag, or the tag zizmor would query is not a plain version such as v1.2.3), so no advisory can be matched to it. Pin the SHA of a released version.")
+          print(f"action pins: {len(pins)} distinct SHA pins checked; rejected: {len(upper_pins)} written in uppercase hex, {len(untagged)} not a tagged release")
+          sys.exit(1 if upper_pins or untagged else 0)
           PY
