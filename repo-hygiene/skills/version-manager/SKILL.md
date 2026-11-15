@@ -1,6 +1,6 @@
 ---
 name: version-manager
-description: Use when bumping a version, cutting a release, or when a CHANGELOG is stale, missing versions, or disagrees with the code — and before opening any PR. Also on /version-manager [check|backfill|release], or when the user says "bump the version", "cut a release", "the changelog is old". Auto-detects version locations in any stack (pyproject, package.json, VERSION file, module constants, README display) — no per-repo config.
+description: Use when bumping a version, cutting a release, or when a CHANGELOG is stale, missing versions, or disagrees with the code — and for every PR, cut as the last commit before it merges. Also on /version-manager [check|backfill|release], or when the user says "bump the version", "cut a release", "the changelog is old". Auto-detects version locations in any stack (pyproject, package.json, VERSION file, module constants, README display) — no per-repo config.
 ---
 
 # Version Manager
@@ -13,7 +13,7 @@ once.
 - **Tool:** `${CLAUDE_PLUGIN_ROOT}/skills/version-manager/version_tool.py` (stdlib only, no install)
 - **Scope:** one repository at a time — there is deliberately no cross-repo sweep
 - **Convention:** the version bump and changelog entry travel in the same commit,
-  before every PR or release
+  cut as the last commit before a PR merges (or for a release outside a PR)
 
 ## Verbs
 
@@ -34,14 +34,25 @@ write nothing until you add `--apply`. Always show the user the dry run first.
 
 ## Standard workflow
 
-**Before opening a PR:**
+**Immediately before a PR merges, as its last commit** — not when you open it.
+With several PRs open at once each one claims the same next version and only
+the first to merge keeps it, so a bump cut early goes stale and has to be
+re-cut. Merge the base branch into the PR first, then:
 
 ```bash
 PY=python3; "$PY" -c '' 2>/dev/null || PY=python
 T="${CLAUDE_PLUGIN_ROOT}/skills/version-manager/version_tool.py"
 "$PY" "$T" --repo /abs/path/to/repo release minor            # dry run: read the draft
-"$PY" "$T" --repo /abs/path/to/repo release minor --notes <scratchpad>/notes.md --apply
+"$PY" "$T" --repo /abs/path/to/repo release minor --notes <scratchpad>/notes.md --apply --no-tag
 ```
+
+`--no-tag` commits the bump without tagging it. Tag the merge commit once the
+PR has merged (`git tag -a vX.Y.Z <merge-sha> -m "Version X.Y.Z"`). A tag
+pushed from a branch whose bump later goes stale points at a commit that never
+shipped, and protected `v*` tags cannot be moved. If a merge-time lander (the
+`land-pr` skill in this plugin) cuts
+the bump for you, it runs this same command; leave the bump to it. Outside a
+PR, drop `--no-tag` and `release` tags the commit itself.
 
 Pick the level from what actually shipped — `major` for a breaking change,
 `minor` for a feature, `patch` for fixes and docs. The dry run prints the level
@@ -80,26 +91,29 @@ release.
 `README.md`'s `**Version X.Y.Z**` display is always a mirror, never canonical.
 An empty `{}` `package.json` is a stub and is skipped, not filled.
 
-**Claude Code plugin marketplaces** (`.claude-plugin/marketplace.json`):
+Also detected: a `.csproj` `<Version>` (every declaration in the file moves
+together; two that disagree are drift and `release` refuses), and a
+single-plugin `.claude-plugin/marketplace.json`, where the version is the
+plugin entry's own `version` key (never `metadata.version`, never a nested
+`source.version`). When that plugin's source is a folder in the repo and it
+has its own `.claude-plugin/plugin.json`, that file's `version` is a mirror.
 
-- **One plugin:** that plugin entry's `version` is canonical. `metadata.version`
-  is the catalog's own series and is left alone. For a local source (`./` or
-  `./plugin-dir`), its `.claude-plugin/plugin.json`, when present, is a mirror
-  updated by ordinary `release` without `--plugin`. Disagreeing or invalid
-  manifest versions block release before either file is changed.
-- **Several plugins with `metadata.version`:** `metadata.version` is canonical.
-  It drives the changelog and the `v*` tag. Each plugin keeps its own version.
-  Bump plugins in the same release with repeatable `--plugin NAME[=LEVEL]`
-  (LEVEL defaults to the release level). The flag updates the marketplace entry
-  and `<plugin>/.claude-plugin/plugin.json` together. It refuses when the two
-  disagree, when a plugin has an external source, or when a name is unknown.
-  The dry run lists each plugin that has commits since its `plugin.json` last
-  changed but is not named:
+A **multi-plugin** marketplace with a `metadata.version` is a catalog: that
+`metadata.version` is canonical and drives the changelog and the `v*` tag,
+while each plugin keeps its own version. Bump plugins in the same release with
+repeatable `--plugin NAME[=LEVEL]` (LEVEL defaults to the release level). The
+flag updates the plugin entry's own `version` and its
+`<plugin>/.claude-plugin/plugin.json` together. It refuses, before writing
+anything, when the two disagree, when a plugin has an external source or a
+source outside the repo, or when a name is unknown or listed twice. The dry
+run lists each plugin with commits since its `plugin.json` version last
+changed that the release does not name. A multi-plugin marketplace without
+`metadata.version` has no repo version and is skipped.
 
-  ```bash
-  "$PY" "$T" --repo /abs/path release minor \
-      --plugin scan-source --plugin docs-toolkit=patch --notes <scratchpad>/notes.md
-  ```
+```bash
+"$PY" "$T" --repo /abs/path release minor \
+    --plugin scan-source --plugin docs-toolkit=patch --notes <scratchpad>/notes.md
+```
 
 The changelog keeps its existing heading style: Keep a Changelog
 `## [1.2.0] - date`, or unbracketed `## 1.2.0 — date`.

@@ -9,7 +9,8 @@ per-repository config file. Every verb is read-only until it prints its plan;
     version_tool.py check    [--repo PATH]
     version_tool.py backfill [--repo PATH] [--apply] [--fix-dates]
     version_tool.py release  <major|minor|patch> [--repo PATH] [--apply]
-                             [--notes FILE] [--plugin NAME[=LEVEL] ...]
+                             [--notes FILE] [--no-tag]
+                             [--plugin NAME[=LEVEL] ...]
 """
 from __future__ import annotations
 
@@ -38,6 +39,8 @@ def git(repo: Path, *args: str, check: bool = True) -> str:
     """Run git with an explicit -C; never changes the process working dir."""
     proc = subprocess.run(
         ["git", "-C", str(repo), *args],
+        # git emits UTF-8; the locale codec (cp1252 on Windows) garbles
+        # commit subjects or raises on bytes it has no mapping for.
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if check and proc.returncode != 0:
@@ -53,7 +56,10 @@ def is_repo(repo: Path) -> bool:
 
 
 def is_dirty(repo: Path) -> bool:
-    return bool(git(repo, "status", "--porcelain").strip())
+    # untracked files inside a submodule are not this repo's dirt; a changed
+    # submodule pointer or modified content still counts
+    return bool(git(repo, "status", "--porcelain",
+                    "--ignore-submodules=untracked").strip())
 
 
 def existing_tags(repo: Path) -> set[str]:
@@ -110,19 +116,162 @@ PATTERNS: dict[str, re.Pattern[str]] = {
         r"(?P<pre>\A[ \t]*)(?P<v>\d+\.\d+\.\d+)(?P<post>[ \t]*(?:\r?\n|\Z))"),
     "readme": re.compile(
         r"(?P<pre>\*\*Version\s+)(?P<v>\d+\.\d+\.\d+)(?P<post>\*\*)"),
-    # Claude Code plugin marketplace: the repo version lives on the single
-    # plugin entry, NOT metadata.version (the catalog's own series). First
-    # "version" key after the plugins array opens is plugins[0]'s — detect()
-    # verifies that against parsed JSON before trusting this pattern.
-    "marketplace": re.compile(
-        r"(?P<pre>\"plugins\"[\s\S]*?\"version\"\s*:\s*\")"
-        r"(?P<v>\d+\.\d+\.\d+)(?P<post>\")"),
-    # Multi-plugin marketplace: the repo version is the catalog's own series
-    # in metadata.version; each plugin is bumped separately (--plugin).
-    "marketplace_meta": re.compile(
-        r"(?P<pre>\"metadata\"\s*:\s*\{[^{}]*?\"version\"\s*:\s*\")"
-        r"(?P<v>\d+\.\d+\.\d+)(?P<post>\")"),
+    # .NET SDK-style project: <Version> is canonical; write_version also syncs
+    # the 4-part <AssemblyVersion>/<FileVersion> siblings when present. A
+    # project may declare <Version> in more than one PropertyGroup: detect()
+    # reads every one and write_version() replaces every one.
+    "csproj": re.compile(
+        r"(?P<pre><Version>\s*)(?P<v>\d+\.\d+\.\d+)(?P<post>\s*</Version>)"),
 }
+
+# JSON manifests whose version is ONE specific key, found by walking the JSON
+# structure rather than by pattern. A pattern cannot tell a plugin entry's own
+# "version" from a nested one: an npm-style `source` object carries a version
+# pin of its own, and "the first version after plugins" would rewrite that pin.
+#   marketplace  .claude-plugin/marketplace.json -> plugins[0].version. NOT
+#                metadata.version (the catalog's own series).
+#   marketplace_meta  the same file -> metadata.version, but only for a
+#                multi-plugin catalog: there the catalog's series IS the repo
+#                version, and each plugin is bumped on its own (--plugin).
+#   plugin_json  <plugin root>/.claude-plugin/plugin.json -> top-level version
+SPAN_KINDS = {"marketplace", "marketplace_meta", "plugin_json"}
+MARKETPLACE_PATH = ".claude-plugin/marketplace.json"
+PLUGIN_MANIFEST = ".claude-plugin/plugin.json"
+
+
+def _json_ws(s: str, i: int) -> int:
+    while i < len(s) and s[i] in " \t\r\n":
+        i += 1
+    return i
+
+
+def _json_string(s: str, i: int) -> int:
+    """Index just past the string that opens at s[i] == '"'."""
+    i += 1
+    while i < len(s):
+        if s[i] == "\\":
+            i += 2
+        elif s[i] == '"':
+            return i + 1
+        else:
+            i += 1
+    raise ValueError("unterminated string")
+
+
+def _json_value(s: str, i: int) -> int:
+    """Index just past the JSON value that starts at s[i]."""
+    if s[i] == '"':
+        return _json_string(s, i)
+    if s[i] in "{[":
+        depth = 0
+        while i < len(s):
+            if s[i] == '"':
+                i = _json_string(s, i)
+                continue
+            if s[i] in "{[":
+                depth += 1
+            elif s[i] in "}]":
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+            i += 1
+        raise ValueError("unterminated container")
+    while i < len(s) and s[i] not in ",}] \t\r\n":
+        i += 1
+    return i
+
+
+class DuplicateKey(ValueError):
+    """One JSON object names the same key twice. Readers keep the LAST value,
+    so no single span is "the" value: writing the first would change a value
+    nothing reads, and a release would tag a version the file does not
+    declare."""
+
+
+# Prefix of a detect() note that makes backfill and release refuse.
+BLOCKING = "BLOCKING: "
+
+
+def _json_member(s: str, obj: int, key: str) -> tuple[int, int] | None:
+    """(start, end) of `key`'s value in the object opening at s[obj] == '{'.
+
+    Only the object's own keys are considered; nested objects are skipped
+    whole, so a key of the same name deeper down never matches. The whole
+    object is read: a key that appears twice raises DuplicateKey.
+    """
+    found: tuple[int, int] | None = None
+    i = _json_ws(s, obj + 1)
+    while s[i] != "}":
+        if s[i] != '"':
+            raise ValueError("expected a key")
+        end = _json_string(s, i)
+        name = json.loads(s[i:end])
+        i = _json_ws(s, end)
+        if s[i] != ":":
+            raise ValueError("expected ':'")
+        start = _json_ws(s, i + 1)
+        stop = _json_value(s, start)
+        if name == key:
+            if found is not None:
+                raise DuplicateKey(key)
+            found = (start, stop)
+        i = _json_ws(s, stop)
+        if s[i] == ",":
+            i = _json_ws(s, i + 1)
+    return found
+
+
+def _owned_span(text: str, kind: str) -> tuple[int, int] | None:
+    """_version_span without the safety net: malformed JSON raises ValueError
+    or IndexError, a repeated key on the path raises DuplicateKey."""
+    obj = _json_ws(text, 1 if text.startswith("﻿") else 0)
+    if text[obj] != "{":
+        return None
+    if kind == "marketplace":
+        plugins = _json_member(text, obj, "plugins")
+        if plugins is None or text[plugins[0]] != "[":
+            return None
+        obj = _json_ws(text, plugins[0] + 1)
+        if text[obj] != "{":
+            return None
+    elif kind == "marketplace_meta":
+        metadata = _json_member(text, obj, "metadata")
+        if metadata is None or text[metadata[0]] != "{":
+            return None
+        obj = metadata[0]
+    span = _json_member(text, obj, "version")
+    if span is None or text[span[0]] != '"':
+        return None
+    start, end = span[0] + 1, span[1] - 1
+    if not re.fullmatch(r"\d+\.\d+\.\d+", text[start:end]):
+        return None
+    return start, end
+
+
+def _version_span(text: str, kind: str) -> tuple[int, int] | None:
+    """Span of the X.Y.Z digits of the one version key a SPAN_KINDS file owns.
+    None when there is no such single key, a repeated one included."""
+    try:
+        return _owned_span(text, kind)
+    except (ValueError, IndexError):
+        return None
+
+
+def _duplicate_key(text: str, kind: str) -> str | None:
+    """The key a SPAN_KINDS file repeats on the way to its version, if any."""
+    try:
+        _owned_span(text, kind)
+    except DuplicateKey as exc:
+        return str(exc)
+    except (ValueError, IndexError):
+        return None
+    return None
+
+
+def _duplicate_note(rel: Path, key: str) -> str:
+    return (f"{BLOCKING}{rel}: \"{key}\" appears twice in one JSON object. "
+            "Readers use the last, so no version can be written safely. "
+            "Remove the duplicate.")
 
 # Some projects' own files name their canonical source; reading it beats
 # guessing. Two phrasings occur in that repo alone, so match both:
@@ -148,7 +297,8 @@ def _pointer_target(text: str) -> str | None:
 # a Next.js app release.
 SKIP_DIRS = {".git", ".venv", ".venv_linux", "node_modules", "__pycache__",
              "dist", "build", ".next", "venv", "site-packages",
-             "generated", "vendor", ".prisma", "out", "coverage", "target"}
+             "generated", "vendor", ".prisma", "out", "coverage", "target",
+             "obj", "bin"}
 
 MAX_DEPTH = 3   # project version files live near the root; deeper is vendored
 
@@ -158,7 +308,7 @@ class Location:
     path: Path          # relative to repo root
     kind: str
     value: str | None
-    mirror_only: bool = False   # dependent version, never canonical
+    mirror_only: bool = False   # display string, never canonical (README)
 
     @property
     def label(self) -> str:
@@ -172,14 +322,133 @@ def _read(repo: Path, rel: Path) -> str | None:
         return None
 
 
+def _inside(repo: Path, rel: Path) -> bool:
+    """True when repo/rel, with every symlink followed, is still in the repo.
+
+    A tracked symlink can point anywhere. Reading through one is harmless;
+    WRITING a version through one changes a file outside the repository, so
+    every version location is checked before it is trusted or written.
+    """
+    try:
+        root = repo.resolve()
+        target = (repo / rel).resolve()
+    except (OSError, RuntimeError):
+        return False
+    return target == root or root in target.parents
+
+
 def _write(path: Path, text: str) -> None:
-    """Write UTF-8 with LF endings; write_text would emit CRLF on Windows."""
-    path.write_bytes(text.encode("utf-8"))
+    """Write text keeping the file's existing line endings.
+
+    Path.write_text translates newlines to os.linesep, so on native Windows a
+    bump would rewrite an LF file as CRLF from end to end.
+    """
+    newline = "\n"
+    try:
+        if b"\r\n" in path.read_bytes():
+            newline = "\r\n"
+    except OSError:
+        pass
+    with open(path, "w", encoding="utf-8", newline=newline) as fh:
+        fh.write(text)
 
 
 def _extract(text: str, kind: str) -> str | None:
+    if kind in SPAN_KINDS:
+        span = _version_span(text, kind)
+        return text[span[0]:span[1]] if span else None
+    if kind == "csproj":
+        live = _outside_comments(PATTERNS[kind], text)
+        return live[0].group("v") if live else None
     m = PATTERNS[kind].search(text)
     return m.group("v") if m else None
+
+
+# Text in an XML file that is not markup: a comment, or a CDATA section
+# (literal characters, whatever they look like).
+XML_DEAD_SPAN = re.compile(r"<!--.*?-->|<!\[CDATA\[.*?\]\]>", re.S)
+
+
+def _outside_comments(pattern: re.Pattern[str], text: str) -> list[re.Match[str]]:
+    """Matches of `pattern` in an XML file that are real markup.
+
+    `<!-- <Version>1.0.0</Version> -->` is a note to a person, and
+    `<![CDATA[<Version>1.0.0</Version>]]>` is literal text. Neither is a
+    declaration: it must be neither read as the project's version nor
+    rewritten by a release.
+    """
+    dead = [m.span() for m in XML_DEAD_SPAN.finditer(text)]
+    return [m for m in pattern.finditer(text)
+            if not any(a <= m.start() < b for a, b in dead)]
+
+
+def _sub_outside_comments(pattern: re.Pattern[str], repl, text: str) -> str:
+    """pattern.sub(repl, text) that leaves matches inside XML comments alone."""
+    live = {m.start() for m in _outside_comments(pattern, text)}
+    return pattern.sub(lambda m: repl(m) if m.start() in live else m.group(0),
+                       text)
+
+
+def _extract_all(text: str, kind: str) -> list[str]:
+    """Every version a file declares. More than one only for csproj, where
+    each PropertyGroup may carry its own <Version>."""
+    if kind == "csproj":
+        return [m.group("v") for m in _outside_comments(PATTERNS[kind], text)]
+    value = _extract(text, kind)
+    return [value] if value is not None else []
+
+
+def _single_plugin(text: str) -> dict | None:
+    """The one plugin entry of a marketplace file, or None when the file is
+    unparseable or lists zero or several plugins (no single repo version)."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    if not isinstance(plugins, list) or len(plugins) != 1 \
+            or not isinstance(plugins[0], dict):
+        return None
+    return plugins[0]
+
+
+def _is_catalog(text: str) -> bool:
+    """True for a marketplace file that lists several plugins."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    return isinstance(plugins, list) and len(plugins) > 1
+
+
+def _manifest_version(text: str, kind: str) -> str | None:
+    """The version a SPAN_KINDS file declares, by the rules detect() applies."""
+    if kind == "marketplace" and _single_plugin(text) is None:
+        return None
+    if kind == "marketplace_meta" and not _is_catalog(text):
+        return None
+    return _extract(text, kind)
+
+
+def _plugin_manifest_for(repo: Path, plugin: dict) -> Path | None:
+    """The plugin's own manifest, when its source is a folder in this repo.
+
+    A single-plugin marketplace whose source is "./" keeps a second copy of
+    the version in .claude-plugin/plugin.json; bumping only the marketplace
+    entry leaves the two disagreeing about what was released.
+    """
+    source = plugin.get("source")
+    if not isinstance(source, str):
+        return None     # npm / git / url source: the plugin lives elsewhere
+    rel = Path(os.path.normpath((Path(source) / PLUGIN_MANIFEST).as_posix()))
+    if rel.is_absolute() or ".." in rel.parts:
+        return None
+    # A `source` that is a symlink out of the repo passes both tests above
+    # and is_file() follows it: the manifest it reaches is someone else's.
+    if not _inside(repo, rel):
+        return None
+    return rel if (repo / rel).is_file() else None
 
 
 MODULE_FILES = {"version.py", "constants.py", "__init__.py", "main.py", "setup.py"}
@@ -210,6 +479,9 @@ def _candidate_files(repo: Path) -> list[tuple[Path, str]]:
             if name in MODULE_FILES:
                 out.append((rel_root / name if rel_root.parts else Path(name),
                             "py_const"))
+            elif name.endswith(".csproj"):
+                out.append((rel_root / name if rel_root.parts else Path(name),
+                            "csproj"))
     return out
 
 
@@ -220,9 +492,17 @@ def detect(repo: Path) -> tuple[Location | None, list[Location], list[str]]:
     candidates = _candidate_files(repo)
 
     for rel, kind in candidates:
+        if not _inside(repo, rel):
+            # A version file that is a link out of the repository: releasing
+            # would rewrite someone else's file. Refuse, loudly.
+            notes.append(f"{BLOCKING}{rel} is a link to a file outside the "
+                         "repository; a release would write through it. "
+                         "Replace the link with a real file.")
+            continue
         text = _read(repo, rel)
         if text is None:
             continue
+        manifest: Path | None = None
         if kind == "package_json":
             # `{}` is a stub, not a version location — do not fill it.
             try:
@@ -238,20 +518,42 @@ def detect(repo: Path) -> tuple[Location | None, list[Location], list[str]]:
             except json.JSONDecodeError:
                 notes.append(f"{rel}: unparseable, skipped")
                 continue
-            plugins = data.get("plugins") or []
-            meta = str((data.get("metadata") or {}).get("version") or "")
-            if len(plugins) > 1 and parse_version(meta) is not None and \
-                    _extract(text, "marketplace_meta") == meta:
+            plugins = data.get("plugins") if isinstance(data, dict) else None
+            if not isinstance(plugins, list):
+                notes.append(f"{rel}: no \"plugins\" list; skipped")
+                continue
+            metadata = data.get("metadata")
+            if len(plugins) > 1:
+                # A catalog: metadata.version is the repo's own series, and
+                # each plugin carries a version of its own (release --plugin).
+                declared = str(metadata.get("version") or "") \
+                    if isinstance(metadata, dict) else ""
+                if not declared:
+                    notes.append(f"{rel}: {len(plugins)} plugins — per-plugin "
+                                 "versions, no single repo version; skipped")
+                    continue
                 kind = "marketplace_meta"
+                repeated = _duplicate_key(text, kind)
+                if repeated:
+                    notes.append(_duplicate_note(rel, repeated))
+                    continue
+                if parse_version(declared) is None or \
+                        _extract(text, kind) != declared:
+                    notes.append(f"{rel}: metadata.version missing or pattern "
+                                 "mismatch; skipped")
+                    continue
                 notes.append(f"{rel}: {len(plugins)} plugins — metadata.version "
                              "is the repo version; bump plugins with "
                              "release --plugin NAME[=LEVEL]")
-            elif len(plugins) != 1:
-                why = ("metadata.version pattern mismatch" if meta and len(plugins) > 1
-                       else "per-plugin versions, no single repo version")
-                notes.append(f"{rel}: {len(plugins)} plugins — {why}; skipped")
-                continue
             else:
+                if len(plugins) != 1:
+                    notes.append(f"{rel}: {len(plugins)} plugins — no single "
+                                 "repo version; skipped")
+                    continue
+                repeated = _duplicate_key(text, kind)
+                if repeated:
+                    notes.append(_duplicate_note(rel, repeated))
+                    continue
                 declared = str(plugins[0].get("version") or "") \
                     if isinstance(plugins[0], dict) else ""
                 if parse_version(declared) is None or \
@@ -259,22 +561,35 @@ def detect(repo: Path) -> tuple[Location | None, list[Location], list[str]]:
                     notes.append(f"{rel}: plugin version missing or pattern "
                                  "mismatch; skipped")
                     continue
-                if meta:
+                if isinstance(metadata, dict) and metadata.get("version"):
                     notes.append(f"{rel}: metadata.version is the catalog's own "
                                  "series — left unmanaged")
-                # The sole entry is the repo version; its local manifest is
-                # another home for that same version, even in a dot-directory.
-                # Keep invalid values as mirrors so release's disagreement
-                # guard refuses before writing either file.
-                for _, pdir in _local_plugins(repo, rel):
-                    manifest = _plugin_json_version(repo, pdir) if pdir is not None else None
-                    if manifest is not None:
-                        found.append(Location(manifest[0], "package_json",
-                                              manifest[1], mirror_only=True))
-        value = _extract(text, kind)
-        if value is None:
+                manifest = _plugin_manifest_for(repo, plugins[0])
+        values = _extract_all(text, kind)
+        if not values:
             continue
-        found.append(Location(rel, kind, value, mirror_only=(kind == "readme")))
+        found.append(Location(rel, kind, values[0],
+                              mirror_only=(kind == "readme")))
+        # One file, several declarations that disagree: each extra value is a
+        # location of its own, so `check` flags it and `release` refuses,
+        # exactly as for two files that disagree.
+        extra = [v for v in dict.fromkeys(values[1:]) if v != values[0]]
+        for v in extra:
+            found.append(Location(rel, kind, v))
+        if extra:
+            notes.append(f"{rel}: declares {len(values)} versions that "
+                         f"disagree ({', '.join(dict.fromkeys(values))})")
+        if manifest is not None:
+            # The plugin's own manifest mirrors the marketplace entry. A
+            # manifest with no version key is fine: the entry is then the
+            # only home.
+            manifest_text = _read(repo, manifest) or ""
+            repeated = _duplicate_key(manifest_text, "plugin_json")
+            if repeated:
+                notes.append(_duplicate_note(manifest, repeated))
+            own = _extract(manifest_text, "plugin_json")
+            if own is not None:
+                found.append(Location(manifest, "plugin_json", own))
 
     # Ladder rung 1 — an explicit pointer comment wins outright.
     pointer: Path | None = None
@@ -296,8 +611,8 @@ def detect(repo: Path) -> tuple[Location | None, list[Location], list[str]]:
         if loc.mirror_only:
             return 90
         return {"pyproject": 10, "package_json": 11, "marketplace": 12,
-                "marketplace_meta": 12, "py_const": 20,
-                "version_file": 30}.get(loc.kind, 50)
+                "marketplace_meta": 12, "plugin_json": 13, "csproj": 14,
+                "py_const": 20, "version_file": 30}.get(loc.kind, 50)
 
     real = [loc for loc in found if not loc.mirror_only]
     if not real:
@@ -310,10 +625,36 @@ def detect(repo: Path) -> tuple[Location | None, list[Location], list[str]]:
 
 
 def write_version(repo: Path, loc: Location, new: str) -> None:
+    if not _inside(repo, loc.path):
+        raise GitError(f"{loc.path} resolves to a file outside the "
+                       "repository; refusing to write it")
     text = _read(repo, loc.path)
     if text is None:
         raise GitError(f"cannot read {loc.path}")
+    if loc.kind in SPAN_KINDS:
+        # Replace exactly the digits of the one key this file owns; nothing
+        # else in the file moves, so key order and indentation survive.
+        span = _version_span(text, loc.kind)
+        if span is None:
+            raise GitError(f"no version key in {loc.path}")
+        _write(repo / loc.path, text[:span[0]] + new + text[span[1]:])
+        return
     pattern = PATTERNS[loc.kind]
+    if loc.kind == "csproj":
+        # Every PropertyGroup's declaration moves together, or a release
+        # would tag the new version while a later group still builds the old
+        # one. Declarations inside XML comments are left exactly as written.
+        if not _outside_comments(pattern, text):
+            raise GitError(f"no version pattern in {loc.path}")
+        updated = _sub_outside_comments(
+            pattern, lambda m: m.group("pre") + new + m.group("post"), text)
+        # Keep the 4-part assembly metadata in step with <Version>.
+        for tag in ("AssemblyVersion", "FileVersion"):
+            updated = _sub_outside_comments(
+                re.compile(rf"(<{tag}>\s*)\d+\.\d+\.\d+(?:\.\d+)?(\s*</{tag}>)"),
+                lambda m: f"{m.group(1)}{new}.0{m.group(2)}", updated)
+        _write(repo / loc.path, updated)
+        return
     if not pattern.search(text):
         raise GitError(f"no version pattern in {loc.path}")
     updated = pattern.sub(lambda m: m.group("pre") + new + m.group("post"),
@@ -322,54 +663,78 @@ def write_version(repo: Path, loc: Location, new: str) -> None:
 
 
 # --------------------------------------------------------------------------
-# per-plugin versions in a multi-plugin marketplace
+# per-plugin versions in a multi-plugin catalog (release --plugin)
 # --------------------------------------------------------------------------
 
 LEVELS = ("major", "minor", "patch")
-ENTRY_VERSION_RE = re.compile(r"(?P<pre>\"version\"\s*:\s*\")(?P<v>\d+\.\d+\.\d+)(?P<post>\")")
 
 
-def _object_end(text: str, start: int) -> int:
-    """Index just past the JSON object whose '{' is at `start` (strings respected)."""
-    depth, i, in_str = 0, start, False
-    while i < len(text):
-        c = text[i]
-        if in_str:
-            if c == "\\":
-                i += 2
-                continue
-            if c == '"':
-                in_str = False
-        elif c == '"':
-            in_str = True
-        elif c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    raise GitError("unbalanced JSON object")
+def _entry_spans(text: str) -> dict[str, list[tuple[int, int]]]:
+    """name -> (start, end) of each object in the top-level plugins array.
 
-
-def _plugin_entry_spans(text: str) -> dict[str, tuple[int, int]]:
-    """name -> (start, end) of each object in the top-level plugins array."""
-    m = re.search(r"\"plugins\"\s*:\s*\[", text)
-    spans: dict[str, tuple[int, int]] = {}
-    i = m.end() if m else len(text)
-    while i < len(text) and text[i] != "]":
+    Walks the JSON structure like _owned_span, so a name or brace inside a
+    string never confuses it. Malformed JSON raises ValueError or IndexError.
+    """
+    obj = _json_ws(text, 1 if text.startswith("﻿") else 0)
+    if text[obj] != "{":
+        raise ValueError("not a JSON object")
+    plugins = _json_member(text, obj, "plugins")
+    if plugins is None or text[plugins[0]] != "[":
+        raise ValueError("no plugins array")
+    spans: dict[str, list[tuple[int, int]]] = {}
+    i = _json_ws(text, plugins[0] + 1)
+    while text[i] != "]":
+        end = _json_value(text, i)
         if text[i] == "{":
-            end = _object_end(text, i)
-            try:
-                name = json.loads(text[i:end]).get("name")
-            except json.JSONDecodeError:
-                name = None
-            if isinstance(name, str):
-                spans[name] = (i, end)
-            i = end
-        else:
-            i += 1
+            name = _json_member(text, i, "name")
+            if name is not None and text[name[0]] == '"':
+                spans.setdefault(json.loads(text[name[0]:name[1]]), []
+                                 ).append((i, end))
+        i = _json_ws(text, end)
+        if text[i] == ",":
+            i = _json_ws(text, i + 1)
     return spans
+
+
+def _entry_version_span(text: str, start: int) -> tuple[int, int] | None:
+    """Span of the X.Y.Z digits of the plugin entry opening at text[start].
+    Only the entry's own key counts, never a nested source pin; a repeated
+    key raises DuplicateKey."""
+    span = _json_member(text, start, "version")
+    if span is None or text[span[0]] != '"':
+        return None
+    a, b = span[0] + 1, span[1] - 1
+    return (a, b) if re.fullmatch(r"\d+\.\d+\.\d+", text[a:b]) else None
+
+
+def _source_inside(repo: Path, source: str) -> bool:
+    """A string source is a folder of this repo, not a path out of it."""
+    rel = Path(os.path.normpath(source))
+    return not rel.is_absolute() and ".." not in rel.parts \
+        and _inside(repo, rel)
+
+
+def _manifest_state(repo: Path, manifest: Path) -> tuple[str | None, str | None]:
+    """(version, problem) of a plugin's own plugin.json. A manifest with no
+    version key is fine: the marketplace entry is then the only home."""
+    text = _read(repo, manifest)
+    if text is None:
+        return None, f"{manifest}: unreadable"
+    repeated = _duplicate_key(text, "plugin_json")
+    if repeated:
+        return None, f"{manifest}: \"{repeated}\" appears twice"
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None, f"{manifest}: unparseable"
+    if not isinstance(data, dict):
+        return None, f"{manifest}: not a JSON object"
+    if "version" not in data:
+        return None, None
+    own = _extract(text, "plugin_json")
+    if own is None or own != data.get("version"):
+        return None, f"{manifest}: version is not X.Y.Z"
+    return own, None
 
 
 @dataclass
@@ -377,49 +742,42 @@ class PluginBump:
     name: str
     old: str
     new: str
-    plugin_json: Path | None   # relative; None when the entry is the only home
+    manifest: Path | None   # the plugin's own plugin.json, when it has a version
 
     @property
     def label(self) -> str:
-        where = "marketplace entry" + (f" + {self.plugin_json}" if self.plugin_json else "")
+        where = "marketplace entry" + (f" + {self.manifest}" if self.manifest else "")
         return f"plugin {self.name} ({where})"
 
 
-def _local_plugins(repo: Path, rel: Path) -> list[tuple[dict, Path | None]]:
-    """(entry, plugin dir) for every plugin; dir is None for external sources."""
-    data = json.loads(_read(repo, rel) or "{}")
-    out = []
-    for entry in data.get("plugins") or []:
-        if not isinstance(entry, dict):
-            continue
-        src = entry.get("source")
-        local = isinstance(src, str) and (src == "./" or src.startswith("./"))
-        out.append((entry, Path(src[2:] or ".") if local else None))
-    return out
-
-
-def _plugin_json_version(repo: Path, pdir: Path) -> tuple[Path, str | None] | None:
-    rel = pdir / ".claude-plugin" / "plugin.json"
+def _catalog_plugins(repo: Path, rel: Path) -> list[tuple[dict, Path | None]]:
+    """(entry, own manifest) for every plugin entry of the catalog."""
     try:
-        text = (repo / rel).read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return (rel, None) if (repo / rel).is_symlink() else None
-    except (OSError, UnicodeDecodeError):
-        return rel, None
-    try:
-        data = json.loads(text)
+        data = json.loads(_read(repo, rel) or "{}")
     except json.JSONDecodeError:
-        return rel, None
-    if not isinstance(data, dict):
-        return rel, None
-    declared = str(data.get("version") or "")
-    return rel, declared if _extract(text, "package_json") == declared else None
+        return []
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    out = []
+    for entry in plugins if isinstance(plugins, list) else []:
+        if isinstance(entry, dict):
+            local = isinstance(entry.get("source"), str)
+            out.append((entry, _plugin_manifest_for(repo, entry) if local else None))
+    return out
 
 
 def resolve_plugin_bumps(repo: Path, rel: Path, specs: list[str],
                          default_level: str) -> tuple[list[PluginBump], list[str]]:
-    """Turn NAME[=LEVEL] specs into bumps; the second list holds refusals."""
-    plugins = {e.get("name"): (e, d) for e, d in _local_plugins(repo, rel)}
+    """Turn NAME[=LEVEL] specs into bumps; the second list holds refusals.
+    Nothing is written here, so one bad spec refuses the whole release."""
+    text = _read(repo, rel) or ""
+    try:
+        spans = _entry_spans(text)
+    except (ValueError, IndexError):
+        return [], [f"{rel}: malformed plugins list"]
+    entries: dict[object, list[tuple[dict, Path | None]]] = {}
+    for entry, manifest in _catalog_plugins(repo, rel):
+        entries.setdefault(entry.get("name"), []).append((entry, manifest))
+
     bumps: list[PluginBump] = []
     errors: list[str] = []
     for spec in specs:
@@ -431,52 +789,76 @@ def resolve_plugin_bumps(repo: Path, rel: Path, specs: list[str],
         if any(b.name == name for b in bumps):
             errors.append(f"{name}: named twice")
             continue
-        if name not in plugins:
+        found = entries.get(name)
+        if not found:
             errors.append(f"{name}: no such plugin in {rel}")
             continue
-        entry, pdir = plugins[name]
-        if pdir is None:
+        if len(found) > 1 or len(spans.get(name, [])) != 1:
+            errors.append(f"{name}: listed more than once in {rel}")
+            continue
+        entry, manifest = found[0]
+        source = entry.get("source")
+        if not isinstance(source, str):
             errors.append(f"{name}: external source — bump it in its own repo")
             continue
-        old = str(entry.get("version") or "")
+        if not _source_inside(repo, source):
+            errors.append(f"{name}: source {source!r} is outside the repository")
+            continue
+        try:
+            vspan = _entry_version_span(text, spans[name][0][0])
+        except DuplicateKey:
+            errors.append(f"{name}: \"version\" appears twice in its entry")
+            continue
+        except (ValueError, IndexError):
+            vspan = None
+        old = text[vspan[0]:vspan[1]] if vspan else ""
         current = parse_version(old)
-        if current is None:
-            errors.append(f"{name}: marketplace entry has no x.y.z version")
+        if current is None or old != entry.get("version"):
+            errors.append(f"{name}: marketplace entry has no X.Y.Z version")
             continue
-        found = _plugin_json_version(repo, pdir)
-        if found is not None and found[1] != old:
-            errors.append(f"{name}: {found[0]} = {found[1]}, marketplace entry = "
-                          f"{old} — resolve by hand first")
-            continue
+        own = None
+        if manifest is not None:
+            own, problem = _manifest_state(repo, manifest)
+            if problem:
+                errors.append(f"{name}: {problem}")
+                continue
+            if own is not None and own != old:
+                errors.append(f"{name}: {manifest} = {own}, marketplace entry = "
+                              f"{old} — resolve by hand first")
+                continue
         bumps.append(PluginBump(name, old, fmt_version(bump(current, level)),
-                                found[0] if found else None))
+                                manifest if own is not None else None))
     return bumps, errors
 
 
 def write_plugin_bump(repo: Path, rel: Path, b: PluginBump) -> None:
-    text = _read(repo, rel) or ""
-    span = _plugin_entry_spans(text).get(b.name)
-    if span is None:
-        raise GitError(f"plugin {b.name} not found in {rel}")
-    start, end = span
-    entry = text[start:end]
-    m = ENTRY_VERSION_RE.search(entry)
-    if not m or m.group("v") != b.old:
-        raise GitError(f"plugin {b.name}: version pattern mismatch in {rel}")
-    entry = entry[:m.start("v")] + b.new + entry[m.end("v"):]
-    _write(repo / rel, text[:start] + entry + text[end:])
-    if b.plugin_json:
-        write_version(repo, Location(b.plugin_json, "package_json", b.old), b.new)
+    text = _read(repo, rel)
+    if text is None:
+        raise GitError(f"cannot read {rel}")
+    try:
+        spans = _entry_spans(text).get(b.name) or []
+        vspan = _entry_version_span(text, spans[0][0]) if len(spans) == 1 else None
+    except (ValueError, IndexError):
+        vspan = None
+    if vspan is None or text[vspan[0]:vspan[1]] != b.old:
+        raise GitError(f"plugin {b.name}: version not found in {rel}")
+    _write(repo / rel, text[:vspan[0]] + b.new + text[vspan[1]:])
+    if b.manifest is not None:
+        write_version(repo, Location(b.manifest, "plugin_json", b.old), b.new)
 
 
 def plugins_changed_since_bump(repo: Path, rel: Path) -> list[tuple[str, int]]:
-    """Local plugins with commits after their plugin.json last changed."""
+    """Local plugins with commits in their folder after their plugin.json
+    version last changed."""
     out = []
-    for entry, pdir in _local_plugins(repo, rel):
-        if pdir is None or pdir == Path("."):
+    for entry, manifest in _catalog_plugins(repo, rel):
+        if manifest is None:
             continue
-        pj = (pdir / ".claude-plugin" / "plugin.json").as_posix()
-        last = git(repo, "log", "-1", "--format=%H", "--", pj, check=False).strip()
+        pdir = manifest.parent.parent
+        if pdir == Path("."):
+            continue    # a root plugin: every commit is "its" commit
+        last = git(repo, "log", "-1", "--format=%H", '-G"version"', "--",
+                   manifest.as_posix(), check=False).strip()
         if not last:
             continue
         n = git(repo, "rev-list", "--count", f"{last}..HEAD", "--",
@@ -514,7 +896,11 @@ def _history_paths(repo: Path, canonical: Location | None) -> list[Path]:
         if not line:
             continue
         p = Path(line)
-        if (p.name in names
+        # marketplace.json is deliberately not in `names`: its history counts
+        # only while it is the canonical location (appended below). A
+        # multi-plugin marketplace has no single repo version, and a commit
+        # from when it listed one plugin must not seed one.
+        if ((p.name in names or p.suffix == ".csproj")
                 and not any(d in p.parts for d in SKIP_DIRS)
                 and len(p.parts) <= MAX_DEPTH):
             paths.append(p)
@@ -530,7 +916,24 @@ def _kind_for(path: Path) -> str:
         return "package_json"
     if path.name == "VERSION":
         return "version_file"
+    if path.suffix == ".csproj":
+        return "csproj"
+    if path.as_posix() == MARKETPLACE_PATH:
+        return "marketplace"
+    if path.as_posix().endswith(PLUGIN_MANIFEST):
+        return "plugin_json"
     return "py_const"
+
+
+def _file_at(repo: Path, sha: str, path: Path) -> str | None:
+    """A file's content at a commit. Bytes are decoded here rather than by
+    subprocess, whose locale codec can reject UTF-8 on Windows."""
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{sha}:{path.as_posix()}"],
+        capture_output=True)
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.decode("utf-8", errors="replace")
 
 
 def git_ledger(repo: Path, canonical: Location | None) -> list[Entry]:
@@ -560,16 +963,40 @@ def git_ledger(repo: Path, canonical: Location | None) -> list[Entry]:
         except ValueError:
             continue
         current_kind: str | None = None
-        for line in body.splitlines():
-            if line.startswith("+++ b/"):
-                current_kind = _kind_for(Path(line[6:].strip()))
-                continue
-            if current_kind is None or not line.startswith("+"):
-                continue
-            value = _extract(line[1:], current_kind)
+
+        def record(value: str | None) -> None:
             if value is not None and value not in hits:
                 hits[value] = Entry(value, sha[:8], when, {"git"})
                 order.append((int(ts), value))
+
+        for line in body.splitlines():
+            if line.startswith("+++ b/"):
+                path = Path(line[6:].strip())
+                current_kind = _kind_for(path)
+                if current_kind == "marketplace" and canonical is not None \
+                        and canonical.kind == "marketplace_meta":
+                    # A catalog's history is its metadata.version series.
+                    current_kind = "marketplace_meta"
+                if current_kind in SPAN_KINDS:
+                    # One added line cannot say WHICH "version" key it is
+                    # (metadata's, a source pin's, the plugin entry's), so
+                    # read the whole file as it stood at this commit.
+                    text = _file_at(repo, sha, path)
+                    record(_manifest_version(text, current_kind)
+                           if text else None)
+                    current_kind = None
+                elif current_kind == "csproj":
+                    # detect() accepts <Version> split across lines; a diff
+                    # line never holds a split tag whole. Read the file as it
+                    # stood, and count it only when its declarations agree.
+                    declared = list(dict.fromkeys(_extract_all(
+                        _file_at(repo, sha, path) or "", "csproj")))
+                    record(declared[0] if len(declared) == 1 else None)
+                    current_kind = None
+                continue
+            if current_kind is None or not line.startswith("+"):
+                continue
+            record(_extract(line[1:], current_kind))
 
     order.sort()
     return [hits[v] for _ts, v in order]
@@ -839,7 +1266,8 @@ def fix_changelog_date(repo: Path, version: str, when: str) -> bool:
                          r"([-–—])\s*\d{4}-\d{2}-\d{2}", re.M)
     if not pattern.search(text):
         return False
-    _write(repo / rel, pattern.sub(lambda m: f"{m.group(1)} {m.group(3)} {when}", text))
+    _write(repo / rel,
+           pattern.sub(lambda m: f"{m.group(1)} {m.group(3)} {when}", text))
     return True
 
 
@@ -863,16 +1291,22 @@ def cmd_check(repo: Path, **_: object) -> int:
         print(f"  canonical: {canonical.label} = {canonical.value}")
     for m in mirrors:
         flag = "" if m.value == (canonical.value if canonical else None) else "  <-- DISAGREES"
-        kind = "display" if m.kind == "readme" else "mirror"
+        kind = "display" if m.mirror_only else "mirror"
         print(f"  {kind}: {m.label} = {m.value}{flag}")
     if canonical and canonical.kind == "marketplace_meta":
-        for entry, pdir in _local_plugins(repo, canonical.path):
+        for entry, manifest in _catalog_plugins(repo, canonical.path):
             v = entry.get("version")
-            found = _plugin_json_version(repo, pdir) if pdir is not None else None
-            flag = (f"  <-- DISAGREES: {found[0]} = {found[1]}"
-                    if found and found[1] != v else "")
-            src = "" if pdir is not None else "  (external)"
-            print(f"  plugin: {entry.get('name')} = {v}{src}{flag}")
+            if not isinstance(entry.get("source"), str):
+                print(f"  plugin: {entry.get('name')} = {v}  (external)")
+                continue
+            flag = ""
+            if manifest is not None:
+                own, problem = _manifest_state(repo, manifest)
+                if problem:
+                    flag = f"  <-- {problem}"
+                elif own is not None and own != v:
+                    flag = f"  <-- DISAGREES: {manifest} = {own}"
+            print(f"  plugin: {entry.get('name')} = {v}{flag}")
 
     rec = reconcile(repo, canonical)
     git_entries = [e for e in rec.entries.values() if "git" in e.sources]
@@ -930,9 +1364,15 @@ def cmd_backfill(repo: Path, apply: bool = False, fix_dates: bool = False,
     canonical, mirrors, notes = detect(repo)
     for n in notes:
         print(f"  note: {n}")
+    if apply and any(n.startswith(BLOCKING) for n in notes):
+        # Otherwise a skipped manifest reads as "no version location" and
+        # backfill would create a second home for the version beside it.
+        print("  REFUSED: a version file cannot be written safely; fix the "
+              "BLOCKING note above, then re-run.")
+        return 1
 
     rec = reconcile(repo, canonical)
-    git_entries = [e for e in rec.entries.values() if "git" in e.sources]
+    git_entries =[e for e in rec.entries.values() if "git" in e.sources]
     plan: list[str] = []
 
     # Step 0 — placeholder repos get a synthesized ledger (§6)
@@ -1016,8 +1456,8 @@ def _subjects_for(repo: Path, rec: Reconciliation, version: str) -> list[str]:
 
 
 def cmd_release(repo: Path, level: str, apply: bool = False,
-                notes: str | None = None, plugin: list[str] | None = None,
-                **_: object) -> int:
+                notes: str | None = None, no_tag: bool = False,
+                plugin: list[str] | None = None, **_: object) -> int:
     _header(repo)
     if is_dirty(repo):
         print("  REFUSED: working tree is dirty — commit or stash first")
@@ -1026,6 +1466,10 @@ def cmd_release(repo: Path, level: str, apply: bool = False,
     canonical, mirrors, det_notes = detect(repo)
     for n in det_notes:
         print(f"  note: {n}")
+    if any(n.startswith(BLOCKING) for n in det_notes):
+        print("  REFUSED: a version file cannot be written safely; fix the "
+              "BLOCKING note above, then re-run.")
+        return 1
     if canonical is None:
         print("  REFUSED: no version location — run backfill first")
         return 1
@@ -1056,7 +1500,8 @@ def cmd_release(repo: Path, level: str, apply: bool = False,
               "(.claude-plugin/marketplace.json with metadata.version)")
         return 1
     if plugin:
-        plugin_bumps, errors = resolve_plugin_bumps(repo, canonical.path, plugin, level)
+        plugin_bumps, errors = resolve_plugin_bumps(repo, canonical.path,
+                                                    plugin, level)
         if errors:
             print("  REFUSED: cannot bump the named plugins:")
             for e in errors:
@@ -1093,9 +1538,11 @@ def cmd_release(repo: Path, level: str, apply: bool = False,
         print(f"  - set {t.label} = {new}")
     for b in plugin_bumps:
         print(f"  - set {b.label} = {b.new}")
-    heading = _section_heading(_read(repo, changelog_path(repo)) or "", new, str(date.today()))
+    heading = _section_heading(_read(repo, changelog_path(repo)) or "", new,
+                               str(date.today()))
     print(f"  - insert changelog {heading.lstrip('# ')}")
-    print(f"  - commit and tag {tag}")
+    print("  - commit" + (" (tag deferred: the lander tags the merge commit)"
+                          if no_tag else f" and tag {tag}"))
 
     if not apply:
         return 0
@@ -1107,16 +1554,17 @@ def cmd_release(repo: Path, level: str, apply: bool = False,
     insert_section(repo, new, str(date.today()), body)
     git(repo, "add", "-A")
     git(repo, "commit", "-m", f"chore(release): {tag}")
-    git(repo, "tag", "-a", tag, "-m", f"Version {new}")
-    print(f"\nreleased {tag}")
+    if not no_tag:
+        git(repo, "tag", "-a", tag, "-m", f"Version {new}")
+    print(f"\nreleased {tag}" + (" (untagged)" if no_tag else ""))
     return 0
 
 
 # --------------------------------------------------------------------------
 
-def _utf8_stdio():
-    # Windows pipes/consoles default to cp1252, which cannot encode the
-    # report's arrows and dashes (UnicodeEncodeError). Force UTF-8.
+def _utf8_stdio() -> None:
+    # Windows pipes and consoles default to cp1252, which cannot encode every
+    # character a report prints (UnicodeEncodeError). Force UTF-8.
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
@@ -1141,6 +1589,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("level", choices=["major", "minor", "patch"])
     r.add_argument("--apply", action="store_true")
     r.add_argument("--notes", help="file holding the curated changelog body")
+    r.add_argument("--no-tag", action="store_true",
+                   help="commit the bump but leave tagging to the lander, "
+                        "which tags the merge commit once the PR has merged")
     r.add_argument("--plugin", action="append", default=[], metavar="NAME[=LEVEL]",
                    help="multi-plugin marketplace: also bump this plugin's "
                         "marketplace entry and plugin.json (repeatable; LEVEL "
