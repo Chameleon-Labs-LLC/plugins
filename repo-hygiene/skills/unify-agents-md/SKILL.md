@@ -115,7 +115,8 @@ your global house rules?"* Proceed only on yes.
    `references/tool-matrix.md`). Only create a symlink when the target is absent
    (guard with `[ -e ] || [ -L ]`); never clobber:
    - **Claude:** `~/.claude/CLAUDE.md` → line 1 `@/home/<user>/.config/agents/AGENTS.md`
-     + Claude-only extras. (Use the absolute path; `~` may not expand in imports.)
+     + Claude-only extras. (Use the absolute path; `~` may not expand in imports.
+     macOS: `/Users/<user>/...`; native Windows: `C:/Users/<user>/...`.)
    - **Codex:** `ln -s ~/.config/agents/AGENTS.md ~/.codex/AGENTS.md` (no import —
      it concatenates).
    - **Copilot:** `ln -s ~/.config/agents/AGENTS.md ~/.copilot/copilot-instructions.md`.
@@ -127,6 +128,15 @@ your global house rules?"* Proceed only on yes.
      layer. Syntax-check with `bash -n`.
    - **agy / Antigravity:** **probe first** (see the matrix). Don't guess its
      wiring; confirm how it loads instructions, then wire or report findings.
+
+   **Native Windows symlinks:** in Git Bash, a plain `ln -s` silently **copies**
+   the file, and the copy drifts from the shared rules. Use
+   `MSYS=winsymlinks:nativestrict ln -s <target> <link>` instead. It makes a real
+   symlink or fails loudly. It needs Developer Mode or an elevated shell. The
+   PowerShell equivalent is `New-Item -ItemType SymbolicLink -Path <link> -Target <target>`.
+   If neither is possible, use the tool's import line where one exists and tell
+   the user which tools still need a link. Verify with `ls -l` (Git Bash) or
+   `(Get-Item <link>).LinkType` (PowerShell).
 
 5. **Report** the wiring table, the backups, and that Claude's own change takes
    effect on the **next** session (the current session already loaded the old

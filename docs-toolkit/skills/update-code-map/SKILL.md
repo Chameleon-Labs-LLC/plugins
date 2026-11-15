@@ -29,9 +29,14 @@ Exclude vendored/generated trees everywhere: `.venv*`, `node_modules`,
 ### 2. Build the symbol inventory (ground truth)
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/update-code-map/references/extract_symbols.py \
+PY=python3; "$PY" -c '' 2>/dev/null || PY=python
+"$PY" "${CLAUDE_PLUGIN_ROOT}/skills/update-code-map/references/extract_symbols.py" \
     --root . --out <scratchpad>/inventory.json
 ```
+
+`python3` on Linux/macOS; on native Windows `python3` is often missing or the
+Microsoft Store stub, so the line above falls back to `python`. Set `PY` in the
+same Bash call that uses it (each call is a fresh shell).
 
 Python is parsed with `ast` (exact lines + end lines + signatures); JS/TS/C#/XAML
 fall back to regex scanning. Every line number in the CodeMap is copied from

@@ -34,8 +34,13 @@ agy, Pi) read `AGENTS.md` and are currently running with no repo rules at all.
 ### 1. Measure (never guess)
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/repo-doctor/audit.py --repo <abs-path>
+PY=python3; "$PY" -c '' 2>/dev/null || PY=python
+"$PY" "${CLAUDE_PLUGIN_ROOT}/skills/repo-doctor/audit.py" --repo <abs-path>
 ```
+
+`python3` on Linux/macOS; on native Windows `python3` is often missing or the
+Microsoft Store stub, so the line above falls back to `python`. Set `PY` in the
+same Bash call that uses it (each call is a fresh shell).
 
 Add `--json` for machine-readable output, `--sample N` to change how many
 CodeMap claims get spot-checked (default 40), `--seed N` for reproducibility.

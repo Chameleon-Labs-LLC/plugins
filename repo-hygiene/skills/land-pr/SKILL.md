@@ -16,20 +16,24 @@ for any PR.
   bump is cut at merge time, so concurrent PRs never claim the same version
 - `status`, `land` and `sweep` are read-only until `--apply`. The one other
   write is `threads --resolve`, which resolves the threads it is given.
-- On Windows use `python` and a Windows path.
+- `python3` on Linux/macOS; on native Windows `python3` is often missing or
+  the Microsoft Store stub, so the commands below fall back to `python`. Set
+  `PY` in the same Bash call that uses it (each call is a fresh shell), and
+  pass Windows paths (`C:/...`) there.
 
 ## Verbs
 
 ```bash
-T=${CLAUDE_PLUGIN_ROOT}/skills/land-pr/pr_tool.py
-python3 $T status                         # every open PR, classified
-python3 $T status --repo OWNER/NAME       # one repo (use before reporting done)
-python3 $T land OWNER/NAME#N              # dry run: release level, merge style
-python3 $T land OWNER/NAME#N --apply      # bump, wait, merge, tag, clean up
-python3 $T sweep                          # dry run of the whole backlog
-python3 $T sweep --apply                  # close superseded, land all READY
-python3 $T threads OWNER/NAME#N           # unresolved review threads, with ids
-python3 $T threads OWNER/NAME#N --resolve ID [ID ...]
+PY=python3; "$PY" -c '' 2>/dev/null || PY=python
+T="${CLAUDE_PLUGIN_ROOT}/skills/land-pr/pr_tool.py"
+"$PY" "$T" status                         # every open PR, classified
+"$PY" "$T" status --repo OWNER/NAME       # one repo (use before reporting done)
+"$PY" "$T" land OWNER/NAME#N              # dry run: release level, merge style
+"$PY" "$T" land OWNER/NAME#N --apply      # bump, wait, merge, tag, clean up
+"$PY" "$T" sweep                          # dry run of the whole backlog
+"$PY" "$T" sweep --apply                  # close superseded, land all READY
+"$PY" "$T" threads OWNER/NAME#N           # unresolved review threads, with ids
+"$PY" "$T" threads OWNER/NAME#N --resolve ID [ID ...]
 ```
 
 Exit codes: `0` done or nothing to do, `1` refused or failed, `3` waiting on
@@ -203,7 +207,8 @@ below.
 ## Tests
 
 ```bash
-python3 -m pytest ${CLAUDE_PLUGIN_ROOT}/skills/land-pr/tests/ -q
+PY=python3; "$PY" -c '' 2>/dev/null || PY=python
+"$PY" -m pytest "${CLAUDE_PLUGIN_ROOT}/skills/land-pr/tests/" -q
 ```
 
 On Windows run pytest from inside the skill folder and pass `--basetemp` if

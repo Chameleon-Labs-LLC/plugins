@@ -17,7 +17,10 @@ once.
 
 ## Verbs
 
-Run with `python3 ${CLAUDE_PLUGIN_ROOT}/skills/version-manager/version_tool.py --repo <ABS_PATH> <verb>`.
+Run with `"$PY" "${CLAUDE_PLUGIN_ROOT}/skills/version-manager/version_tool.py" --repo <ABS_PATH> <verb>`,
+where `PY=python3; "$PY" -c '' 2>/dev/null || PY=python` runs first in the same
+Bash call. That line picks `python3` on Linux/macOS and falls back to `python` on
+native Windows, where `python3` is often missing or the Microsoft Store stub.
 `--repo` defaults to the current directory; always pass an absolute path.
 
 | Verb | Writes? | Use it for |
@@ -37,9 +40,11 @@ the first to merge keeps it, so a bump cut early goes stale and has to be
 re-cut. Merge the base branch into the PR first, then:
 
 ```bash
-T=${CLAUDE_PLUGIN_ROOT}/skills/version-manager/version_tool.py
-python3 $T --repo /abs/path/to/repo release minor            # dry run: read the draft
-python3 $T --repo /abs/path/to/repo release minor --notes /tmp/notes.md --apply --no-tag
+PY=python3; "$PY" -c '' 2>/dev/null || PY=python
+T="${CLAUDE_PLUGIN_ROOT}/skills/version-manager/version_tool.py"
+NOTES="/abs/path/to/notes.md"   # the curated changelog body (see below)
+"$PY" "$T" --repo /abs/path/to/repo release minor            # dry run: read the draft
+"$PY" "$T" --repo /abs/path/to/repo release minor --notes "$NOTES" --apply --no-tag
 ```
 
 `--no-tag` commits the bump without tagging it. Tag the merge commit once the
@@ -55,16 +60,21 @@ Pick the level from what actually shipped — `major` for a breaking change,
 the commits suggest; it never picks silently.
 
 **Curate the changelog body.** The generated draft is raw commit subjects. Rewrite
-it into prose in a file and pass `--notes FILE`. This is the deliberate manual
+it into prose in a file and pass `--notes FILE`. On native Windows give `FILE`
+as a Windows path (`C:/...`), not `/tmp/...`: a file written with the Write tool
+at `/tmp/...` lands in `<drive>:\tmp`, while Git Bash maps the same `/tmp`
+argument to its own temp dir, so the tool would read a different file. This is the deliberate manual
 step — generated draft, curated release.
 
 **Adopting the tool in a repo for the first time:**
 
 ```bash
-python3 $T --repo /abs/path check                    # see what is wrong
-python3 $T --repo /abs/path backfill                 # dry run
-python3 $T --repo /abs/path backfill --apply         # tags + changelog gaps
-python3 $T --repo /abs/path backfill --apply --fix-dates   # only if dates are wrong
+PY=python3; "$PY" -c '' 2>/dev/null || PY=python
+T="${CLAUDE_PLUGIN_ROOT}/skills/version-manager/version_tool.py"
+"$PY" "$T" --repo /abs/path check                    # see what is wrong
+"$PY" "$T" --repo /abs/path backfill                 # dry run
+"$PY" "$T" --repo /abs/path backfill --apply         # tags + changelog gaps
+"$PY" "$T" --repo /abs/path backfill --apply --fix-dates   # only if dates are wrong
 ```
 
 ## What it detects (no manifest)
@@ -91,6 +101,32 @@ plugin entry's own `version` key (never `metadata.version`, never a nested
 `source.version`). When that plugin's source is a folder in the repo and it
 has its own `.claude-plugin/plugin.json`, that file's `version` is a mirror.
 
+A **multi-plugin** marketplace with a `metadata.version` is a catalog: that
+`metadata.version` is canonical and drives the changelog and the `v*` tag,
+while each plugin keeps its own version. A versioned root `package.json` or
+`pyproject.toml` outranks it: that file is then canonical and drives the
+changelog and tag, and the catalog's `metadata.version` is a mirror that moves
+with it (`--plugin` still works through the catalog). Bump plugins in the same release with
+repeatable `--plugin NAME[=LEVEL]` (LEVEL defaults to the release level). The
+flag updates the plugin entry's own `version` and its
+`<plugin>/.claude-plugin/plugin.json` together. It refuses, before writing
+anything, when the two disagree, when a plugin has an external source or a
+source outside the repo, or when a name is unknown or listed twice. The dry
+run lists each plugin with commits since its `plugin.json` version last
+changed that the release does not name. A multi-plugin marketplace without
+`metadata.version` has no repo version and is skipped.
+
+```bash
+PY=python3; "$PY" -c '' 2>/dev/null || PY=python
+T="${CLAUDE_PLUGIN_ROOT}/skills/version-manager/version_tool.py"
+NOTES="/abs/path/to/notes.md"
+"$PY" "$T" --repo /abs/path release minor \
+    --plugin scan-source --plugin docs-toolkit=patch --notes "$NOTES"
+```
+
+The changelog keeps its existing heading style: Keep a Changelog
+`## [1.2.0] - date`, or unbracketed `## 1.2.0 — date`.
+
 ## Gotchas
 
 - **`release` refuses on a dirty tree, an existing tag, or disagreeing version
@@ -112,8 +148,8 @@ has its own `.claude-plugin/plugin.json`, that file's `version` is a mirror.
 ## Tests
 
 ```bash
-source /path/to/your/venv/bin/activate
-python3 -m pytest ${CLAUDE_PLUGIN_ROOT}/skills/version-manager/tests/ -q
+PY=python3; "$PY" -c '' 2>/dev/null || PY=python   # any Python with pytest installed
+"$PY" -m pytest "${CLAUDE_PLUGIN_ROOT}/skills/version-manager/tests/" -q
 ```
 
 Each fixture reproduces a defect that is actually present in one of the user's

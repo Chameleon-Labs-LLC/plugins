@@ -10,6 +10,7 @@ per-repository config file. Every verb is read-only until it prints its plan;
     version_tool.py backfill [--repo PATH] [--apply] [--fix-dates]
     version_tool.py release  <major|minor|patch> [--repo PATH] [--apply]
                              [--notes FILE] [--no-tag]
+                             [--plugin NAME[=LEVEL] ...]
 """
 from __future__ import annotations
 
@@ -38,7 +39,9 @@ def git(repo: Path, *args: str, check: bool = True) -> str:
     """Run git with an explicit -C; never changes the process working dir."""
     proc = subprocess.run(
         ["git", "-C", str(repo), *args],
-        capture_output=True, text=True,
+        # git emits UTF-8; the locale codec (cp1252 on Windows) garbles
+        # commit subjects or raises on bytes it has no mapping for.
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if check and proc.returncode != 0:
         raise GitError(f"git {' '.join(args)}: {proc.stderr.strip()}")
@@ -127,8 +130,11 @@ PATTERNS: dict[str, re.Pattern[str]] = {
 # pin of its own, and "the first version after plugins" would rewrite that pin.
 #   marketplace  .claude-plugin/marketplace.json -> plugins[0].version. NOT
 #                metadata.version (the catalog's own series).
+#   marketplace_meta  the same file -> metadata.version, but only for a
+#                multi-plugin catalog: there the catalog's series IS the repo
+#                version, and each plugin is bumped on its own (--plugin).
 #   plugin_json  <plugin root>/.claude-plugin/plugin.json -> top-level version
-SPAN_KINDS = {"marketplace", "plugin_json"}
+SPAN_KINDS = {"marketplace", "marketplace_meta", "plugin_json"}
 MARKETPLACE_PATH = ".claude-plugin/marketplace.json"
 PLUGIN_MANIFEST = ".claude-plugin/plugin.json"
 
@@ -228,6 +234,11 @@ def _owned_span(text: str, kind: str) -> tuple[int, int] | None:
         obj = _json_ws(text, plugins[0] + 1)
         if text[obj] != "{":
             return None
+    elif kind == "marketplace_meta":
+        metadata = _json_member(text, obj, "metadata")
+        if metadata is None or text[metadata[0]] != "{":
+            return None
+        obj = metadata[0]
     span = _json_member(text, obj, "version")
     if span is None or text[span[0]] != '"':
         return None
@@ -401,9 +412,21 @@ def _single_plugin(text: str) -> dict | None:
     return plugins[0]
 
 
+def _is_catalog(text: str) -> bool:
+    """True for a marketplace file that lists several plugins."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    return isinstance(plugins, list) and len(plugins) > 1
+
+
 def _manifest_version(text: str, kind: str) -> str | None:
     """The version a SPAN_KINDS file declares, by the rules detect() applies."""
     if kind == "marketplace" and _single_plugin(text) is None:
+        return None
+    if kind == "marketplace_meta" and not _is_catalog(text):
         return None
     return _extract(text, kind)
 
@@ -499,26 +522,49 @@ def detect(repo: Path) -> tuple[Location | None, list[Location], list[str]]:
             if not isinstance(plugins, list):
                 notes.append(f"{rel}: no \"plugins\" list; skipped")
                 continue
-            if len(plugins) != 1:
-                notes.append(f"{rel}: {len(plugins)} plugins — per-plugin "
-                             "versions, no single repo version; skipped")
-                continue
-            repeated = _duplicate_key(text, kind)
-            if repeated:
-                notes.append(_duplicate_note(rel, repeated))
-                continue
-            declared = str(plugins[0].get("version") or "") \
-                if isinstance(plugins[0], dict) else ""
-            if parse_version(declared) is None or \
-                    _extract(text, kind) != declared:
-                notes.append(f"{rel}: plugin version missing or pattern "
-                             "mismatch; skipped")
-                continue
             metadata = data.get("metadata")
-            if isinstance(metadata, dict) and metadata.get("version"):
-                notes.append(f"{rel}: metadata.version is the catalog's own "
-                             "series — left unmanaged")
-            manifest = _plugin_manifest_for(repo, plugins[0])
+            if len(plugins) > 1:
+                # A catalog: metadata.version is the repo's own series, and
+                # each plugin carries a version of its own (release --plugin).
+                declared = str(metadata.get("version") or "") \
+                    if isinstance(metadata, dict) else ""
+                if not declared:
+                    notes.append(f"{rel}: {len(plugins)} plugins — per-plugin "
+                                 "versions, no single repo version; skipped")
+                    continue
+                kind = "marketplace_meta"
+                repeated = _duplicate_key(text, kind)
+                if repeated:
+                    notes.append(_duplicate_note(rel, repeated))
+                    continue
+                if parse_version(declared) is None or \
+                        _extract(text, kind) != declared:
+                    notes.append(f"{rel}: metadata.version missing or pattern "
+                                 "mismatch; skipped")
+                    continue
+                notes.append(f"{rel}: {len(plugins)} plugins — metadata.version "
+                             "is the repo version; bump plugins with "
+                             "release --plugin NAME[=LEVEL]")
+            else:
+                if len(plugins) != 1:
+                    notes.append(f"{rel}: {len(plugins)} plugins — no single "
+                                 "repo version; skipped")
+                    continue
+                repeated = _duplicate_key(text, kind)
+                if repeated:
+                    notes.append(_duplicate_note(rel, repeated))
+                    continue
+                declared = str(plugins[0].get("version") or "") \
+                    if isinstance(plugins[0], dict) else ""
+                if parse_version(declared) is None or \
+                        _extract(text, kind) != declared:
+                    notes.append(f"{rel}: plugin version missing or pattern "
+                                 "mismatch; skipped")
+                    continue
+                if isinstance(metadata, dict) and metadata.get("version"):
+                    notes.append(f"{rel}: metadata.version is the catalog's own "
+                                 "series — left unmanaged")
+                manifest = _plugin_manifest_for(repo, plugins[0])
         values = _extract_all(text, kind)
         if not values:
             continue
@@ -565,7 +611,7 @@ def detect(repo: Path) -> tuple[Location | None, list[Location], list[str]]:
         if loc.mirror_only:
             return 90
         return {"pyproject": 10, "package_json": 11, "marketplace": 12,
-                "plugin_json": 13, "csproj": 14,
+                "marketplace_meta": 12, "plugin_json": 13, "csproj": 14,
                 "py_const": 20, "version_file": 30}.get(loc.kind, 50)
 
     real = [loc for loc in found if not loc.mirror_only]
@@ -617,6 +663,273 @@ def write_version(repo: Path, loc: Location, new: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# per-plugin versions in a multi-plugin catalog (release --plugin)
+# --------------------------------------------------------------------------
+
+LEVELS = ("major", "minor", "patch")
+
+
+def _entry_spans(text: str) -> dict[str, list[tuple[int, int]]]:
+    """name -> (start, end) of each object in the top-level plugins array.
+
+    Walks the JSON structure like _owned_span, so a name or brace inside a
+    string never confuses it. Malformed JSON raises ValueError or IndexError.
+    """
+    obj = _json_ws(text, 1 if text.startswith("﻿") else 0)
+    if text[obj] != "{":
+        raise ValueError("not a JSON object")
+    plugins = _json_member(text, obj, "plugins")
+    if plugins is None or text[plugins[0]] != "[":
+        raise ValueError("no plugins array")
+    spans: dict[str, list[tuple[int, int]]] = {}
+    i = _json_ws(text, plugins[0] + 1)
+    while text[i] != "]":
+        end = _json_value(text, i)
+        if text[i] == "{":
+            name = _json_member(text, i, "name")
+            if name is not None and text[name[0]] == '"':
+                spans.setdefault(json.loads(text[name[0]:name[1]]), []
+                                 ).append((i, end))
+        i = _json_ws(text, end)
+        if text[i] == ",":
+            i = _json_ws(text, i + 1)
+    return spans
+
+
+def _entry_version_span(text: str, start: int) -> tuple[int, int] | None:
+    """Span of the X.Y.Z digits of the plugin entry opening at text[start].
+    Only the entry's own key counts, never a nested source pin; a repeated
+    key raises DuplicateKey."""
+    span = _json_member(text, start, "version")
+    if span is None or text[span[0]] != '"':
+        return None
+    a, b = span[0] + 1, span[1] - 1
+    return (a, b) if re.fullmatch(r"\d+\.\d+\.\d+", text[a:b]) else None
+
+
+def _source_inside(repo: Path, source: str) -> bool:
+    """A string source is a folder of this repo, not a path out of it."""
+    rel = Path(os.path.normpath(source))
+    return not rel.is_absolute() and ".." not in rel.parts \
+        and _inside(repo, rel)
+
+
+def _manifest_state(repo: Path, manifest: Path) -> tuple[str | None, str | None]:
+    """(version, problem) of a plugin's own plugin.json. A manifest with no
+    version key is fine: the marketplace entry is then the only home."""
+    text = _read(repo, manifest)
+    if text is None:
+        return None, f"{manifest}: unreadable"
+    repeated = _duplicate_key(text, "plugin_json")
+    if repeated:
+        return None, f"{manifest}: \"{repeated}\" appears twice"
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None, f"{manifest}: unparseable"
+    if not isinstance(data, dict):
+        return None, f"{manifest}: not a JSON object"
+    if "version" not in data:
+        return None, None
+    own = _extract(text, "plugin_json")
+    if own is None or own != data.get("version"):
+        return None, f"{manifest}: version is not X.Y.Z"
+    return own, None
+
+
+@dataclass
+class PluginBump:
+    name: str
+    old: str
+    new: str
+    manifest: Path | None   # the plugin's own plugin.json, when it has a version
+
+    @property
+    def label(self) -> str:
+        where = "marketplace entry" + (f" + {self.manifest}" if self.manifest else "")
+        return f"plugin {self.name} ({where})"
+
+
+def _manifest_rejected(repo: Path, entry: dict) -> bool:
+    """True when the plugin's folder has a plugin.json that
+    _plugin_manifest_for() will not use (a link out of the repo, or not a
+    regular file). Treating that as "no manifest" would bump the entry alone
+    and leave the manifest stale."""
+    source = entry.get("source")
+    if not isinstance(source, str):
+        return False
+    rel = Path(os.path.normpath((Path(source) / PLUGIN_MANIFEST).as_posix()))
+    if rel.is_absolute() or ".." in rel.parts:
+        return False    # the source itself is refused separately
+    return os.path.lexists(repo / rel) and _plugin_manifest_for(repo, entry) is None
+
+
+def _catalog_location(canonical: Location | None,
+                      mirrors: list[Location]) -> Location | None:
+    """The multi-plugin catalog among the detected locations. It is usually
+    canonical, but a versioned package.json or pyproject.toml outranks it;
+    plugin bumps still go through the catalog then."""
+    for loc in ([canonical] if canonical else []) + mirrors:
+        if loc.kind == "marketplace_meta":
+            return loc
+    return None
+
+
+def _catalog_plugins(repo: Path, rel: Path) -> list[tuple[dict, Path | None]]:
+    """(entry, own manifest) for every plugin entry of the catalog."""
+    try:
+        data = json.loads(_read(repo, rel) or "{}")
+    except json.JSONDecodeError:
+        return []
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    out = []
+    for entry in plugins if isinstance(plugins, list) else []:
+        if isinstance(entry, dict):
+            local = isinstance(entry.get("source"), str)
+            out.append((entry, _plugin_manifest_for(repo, entry) if local else None))
+    return out
+
+
+def resolve_plugin_bumps(repo: Path, rel: Path, specs: list[str],
+                         default_level: str) -> tuple[list[PluginBump], list[str]]:
+    """Turn NAME[=LEVEL] specs into bumps; the second list holds refusals.
+    Nothing is written here, so one bad spec refuses the whole release."""
+    text = _read(repo, rel) or ""
+    try:
+        spans = _entry_spans(text)
+    except (ValueError, IndexError):
+        return [], [f"{rel}: malformed plugins list"]
+    entries: dict[object, list[tuple[dict, Path | None]]] = {}
+    for entry, manifest in _catalog_plugins(repo, rel):
+        entries.setdefault(entry.get("name"), []).append((entry, manifest))
+
+    bumps: list[PluginBump] = []
+    errors: list[str] = []
+    for spec in specs:
+        name, _, level = spec.partition("=")
+        level = level or default_level
+        if level not in LEVELS:
+            errors.append(f"{spec}: level must be one of {', '.join(LEVELS)}")
+            continue
+        if any(b.name == name for b in bumps):
+            errors.append(f"{name}: named twice")
+            continue
+        found = entries.get(name)
+        if not found:
+            errors.append(f"{name}: no such plugin in {rel}")
+            continue
+        if len(found) > 1 or len(spans.get(name, [])) != 1:
+            errors.append(f"{name}: listed more than once in {rel}")
+            continue
+        entry, manifest = found[0]
+        source = entry.get("source")
+        if not isinstance(source, str):
+            errors.append(f"{name}: external source — bump it in its own repo")
+            continue
+        if not _source_inside(repo, source):
+            errors.append(f"{name}: source {source!r} is outside the repository")
+            continue
+        if _manifest_rejected(repo, entry):
+            errors.append(f"{name}: its .claude-plugin/plugin.json is a link out "
+                          "of the repository or not a regular file")
+            continue
+        try:
+            vspan = _entry_version_span(text, spans[name][0][0])
+        except DuplicateKey:
+            errors.append(f"{name}: \"version\" appears twice in its entry")
+            continue
+        except (ValueError, IndexError):
+            vspan = None
+        old = text[vspan[0]:vspan[1]] if vspan else ""
+        current = parse_version(old)
+        if current is None or old != entry.get("version"):
+            errors.append(f"{name}: marketplace entry has no X.Y.Z version")
+            continue
+        own = None
+        if manifest is not None:
+            own, problem = _manifest_state(repo, manifest)
+            if problem:
+                errors.append(f"{name}: {problem}")
+                continue
+            if own is not None and own != old:
+                errors.append(f"{name}: {manifest} = {own}, marketplace entry = "
+                              f"{old} — resolve by hand first")
+                continue
+        bumps.append(PluginBump(name, old, fmt_version(bump(current, level)),
+                                manifest if own is not None else None))
+
+    # Two entries can point at one folder, and so share one plugin.json. Every
+    # entry that shares a manifest being written must move to the same
+    # version, or the release commits an entry that disagrees with it.
+    targets: dict[Path, dict[str, str]] = {}
+    for b in bumps:
+        if b.manifest is not None:
+            targets.setdefault((repo / b.manifest).resolve(), {})[b.name] = b.new
+    for shared in targets.values():
+        if len(set(shared.values())) > 1:
+            errors.append("one plugin.json, different versions: " + ", ".join(
+                f"{n} -> {v}" for n, v in sorted(shared.items())))
+    for name, found in entries.items():
+        for entry, manifest in found:
+            if manifest is None or any(b.name == name for b in bumps):
+                continue
+            if (repo / manifest).resolve() in targets:
+                errors.append(f"{name}: shares {manifest} with a plugin being "
+                              "bumped; name it with --plugin too")
+    return bumps, errors
+
+
+def write_plugin_bump(repo: Path, rel: Path, b: PluginBump) -> None:
+    text = _read(repo, rel)
+    if text is None:
+        raise GitError(f"cannot read {rel}")
+    try:
+        spans = _entry_spans(text).get(b.name) or []
+        vspan = _entry_version_span(text, spans[0][0]) if len(spans) == 1 else None
+    except (ValueError, IndexError):
+        vspan = None
+    if vspan is None or text[vspan[0]:vspan[1]] != b.old:
+        raise GitError(f"plugin {b.name}: version not found in {rel}")
+    _write(repo / rel, text[:vspan[0]] + b.new + text[vspan[1]:])
+    if b.manifest is not None:
+        write_version(repo, Location(b.manifest, "plugin_json", b.old), b.new)
+
+
+def _last_version_change(repo: Path, manifest: Path) -> str | None:
+    """The newest commit that changed the manifest's top-level version.
+    Edits to other keys (a description on the same line) do not count."""
+    shas = git(repo, "log", "--reverse", "--format=%H", "--",
+               manifest.as_posix(), check=False).split()
+    last, seen = None, None
+    for sha in shas:
+        text = _file_at(repo, sha, manifest)
+        version = _extract(text, "plugin_json") if text else None
+        if version != seen:
+            last, seen = sha, version
+    return last
+
+
+def plugins_changed_since_bump(repo: Path, rel: Path) -> list[tuple[str, int]]:
+    """Local plugins with commits in their folder after their plugin.json
+    version last changed."""
+    out = []
+    for entry, manifest in _catalog_plugins(repo, rel):
+        if manifest is None:
+            continue
+        pdir = manifest.parent.parent
+        if pdir == Path("."):
+            continue    # a root plugin: every commit is "its" commit
+        last = _last_version_change(repo, manifest)
+        if not last:
+            continue
+        n = git(repo, "rev-list", "--count", f"{last}..HEAD", "--",
+                pdir.as_posix(), check=False).strip()
+        if n.isdigit() and int(n) > 0:
+            out.append((str(entry.get("name")), int(n)))
+    return out
+
+
+# --------------------------------------------------------------------------
 # the ledger (§5) — union of git-derived and changelog-declared
 # --------------------------------------------------------------------------
 
@@ -652,9 +965,23 @@ def _history_paths(repo: Path, canonical: Location | None) -> list[Path]:
                 and not any(d in p.parts for d in SKIP_DIRS)
                 and len(p.parts) <= MAX_DEPTH):
             paths.append(p)
-    if canonical and canonical.path not in paths:
-        paths.append(canonical.path)
+    # The detected homes go first so the cap below never drops them. A
+    # catalog keeps its history even when a versioned package.json or
+    # pyproject.toml outranks it and it is only a mirror.
+    homes = [canonical.path] if canonical else []
+    if _head_catalog(repo) and Path(MARKETPLACE_PATH) not in homes:
+        homes.append(Path(MARKETPLACE_PATH))
+    paths = homes + [p for p in paths if p not in homes]
     return paths[:30]
+
+
+def _head_catalog(repo: Path) -> bool:
+    """True when the working tree's marketplace is a catalog that detect()
+    tracks: several plugins and an X.Y.Z metadata.version."""
+    text = _read(repo, Path(MARKETPLACE_PATH))
+    if not text or _duplicate_key(text, "marketplace_meta"):
+        return False
+    return _manifest_version(text, "marketplace_meta") is not None
 
 
 def _kind_for(path: Path) -> str:
@@ -695,6 +1022,7 @@ def git_ledger(repo: Path, canonical: Location | None) -> list[Entry]:
     paths = _history_paths(repo, canonical)
     if not paths:
         return []
+    catalog = _head_catalog(repo)
 
     hits: dict[str, Entry] = {}
     order: list[tuple[int, str]] = []
@@ -721,6 +1049,10 @@ def git_ledger(repo: Path, canonical: Location | None) -> list[Entry]:
             if line.startswith("+++ b/"):
                 path = Path(line[6:].strip())
                 current_kind = _kind_for(path)
+                if current_kind == "marketplace" and catalog:
+                    # A catalog's history is its metadata.version series,
+                    # whether it is canonical or a mirror.
+                    current_kind = "marketplace_meta"
                 if current_kind in SPAN_KINDS:
                     # One added line cannot say WHICH "version" key it is
                     # (metadata's, a source pin's, the plugin entry's), so
@@ -746,8 +1078,18 @@ def git_ledger(repo: Path, canonical: Location | None) -> list[Entry]:
     return [hits[v] for _ts, v in order]
 
 
+# Keep a Changelog "## [1.2.0] - 2026-01-01", or the unbracketed
+# "## 1.2.0 — 2026-01-01" some catalogs use. New sections copy the file's style.
 CHANGELOG_HEADING = re.compile(
-    r"^##\s*\[(?P<v>\d+\.\d+\.\d+)\]\s*(?:-\s*(?P<d>\d{4}-\d{2}-\d{2}))?", re.M)
+    r"^##\s*(?P<ob>\[)?(?P<v>\d+\.\d+\.\d+)(?(ob)\]|(?=\s|$))"
+    r"\s*(?:(?P<sep>[-–—])\s*(?P<d>\d{4}-\d{2}-\d{2}))?", re.M)
+
+
+def _section_heading(text: str, version: str, when: str) -> str:
+    m = CHANGELOG_HEADING.search(text)
+    if m and not m.group("ob"):
+        return f"## {version} {m.group('sep') or '-'} {when}"
+    return f"## [{version}] - {when}"
 
 
 def changelog_path(repo: Path) -> Path:
@@ -975,7 +1317,7 @@ def insert_section(repo: Path, version: str, when: str, body: str) -> None:
     text = _read(repo, rel)
     if text is None:
         text = KAC_HEADER
-    section = f"\n## [{version}] - {when}\n\n{body.rstrip()}\n"
+    section = f"\n{_section_heading(text, version, when)}\n\n{body.rstrip()}\n"
 
     if "## [Unreleased]" in text:
         head, _, tail = text.partition("## [Unreleased]")
@@ -996,11 +1338,12 @@ def fix_changelog_date(repo: Path, version: str, when: str) -> bool:
     text = _read(repo, rel)
     if text is None:
         return False
-    pattern = re.compile(rf"^(##\s*\[{re.escape(version)}\])\s*-\s*\d{{4}}-\d{{2}}-\d{{2}}",
-                         re.M)
+    pattern = re.compile(rf"^(##\s*(\[)?{re.escape(version)}(?(2)\]))\s*"
+                         r"([-–—])\s*\d{4}-\d{2}-\d{2}", re.M)
     if not pattern.search(text):
         return False
-    _write(repo / rel, pattern.sub(rf"\1 - {when}", text))
+    _write(repo / rel,
+           pattern.sub(lambda m: f"{m.group(1)} {m.group(3)} {when}", text))
     return True
 
 
@@ -1026,6 +1369,21 @@ def cmd_check(repo: Path, **_: object) -> int:
         flag = "" if m.value == (canonical.value if canonical else None) else "  <-- DISAGREES"
         kind = "display" if m.mirror_only else "mirror"
         print(f"  {kind}: {m.label} = {m.value}{flag}")
+    catalog = _catalog_location(canonical, mirrors)
+    if catalog is not None:
+        for entry, manifest in _catalog_plugins(repo, catalog.path):
+            v = entry.get("version")
+            if not isinstance(entry.get("source"), str):
+                print(f"  plugin: {entry.get('name')} = {v}  (external)")
+                continue
+            flag = ""
+            if manifest is not None:
+                own, problem = _manifest_state(repo, manifest)
+                if problem:
+                    flag = f"  <-- {problem}"
+                elif own is not None and own != v:
+                    flag = f"  <-- DISAGREES: {manifest} = {own}"
+            print(f"  plugin: {entry.get('name')} = {v}{flag}")
 
     rec = reconcile(repo, canonical)
     git_entries = [e for e in rec.entries.values() if "git" in e.sources]
@@ -1176,7 +1534,7 @@ def _subjects_for(repo: Path, rec: Reconciliation, version: str) -> list[str]:
 
 def cmd_release(repo: Path, level: str, apply: bool = False,
                 notes: str | None = None, no_tag: bool = False,
-                **_: object) -> int:
+                plugin: list[str] | None = None, **_: object) -> int:
     _header(repo)
     if is_dirty(repo):
         print("  REFUSED: working tree is dirty — commit or stash first")
@@ -1212,6 +1570,21 @@ def cmd_release(repo: Path, level: str, apply: bool = False,
         print(f"  REFUSED: tag {tag} already exists")
         return 1
 
+    plugin_bumps: list[PluginBump] = []
+    catalog = _catalog_location(canonical, mirrors)
+    if plugin and catalog is None:
+        print("  REFUSED: --plugin needs a multi-plugin marketplace "
+              "(.claude-plugin/marketplace.json with metadata.version)")
+        return 1
+    if plugin:
+        plugin_bumps, errors = resolve_plugin_bumps(repo, catalog.path,
+                                                    plugin, level)
+        if errors:
+            print("  REFUSED: cannot bump the named plugins:")
+            for e in errors:
+                print(f"    {e}")
+            return 1
+
     tags = existing_tags(repo)
     versioned = sorted((t for t in tags if parse_version(t.lstrip("v"))),
                        key=lambda t: version_key(t.lstrip("v")))
@@ -1223,6 +1596,14 @@ def cmd_release(repo: Path, level: str, apply: bool = False,
     print(f"  {canonical.value} -> {new}  ({level}"
           + (f"; commits suggest {suggested}" if suggested != level else "") + ")")
     print(f"  {len(subjects)} commits in {rng}")
+    for b in plugin_bumps:
+        print(f"  {b.name}: {b.old} -> {b.new}")
+    if catalog is not None:
+        named = {b.name for b in plugin_bumps}
+        for name, n in plugins_changed_since_bump(repo, catalog.path):
+            if name not in named:
+                print(f"  note: plugin {name} has {n} commit(s) since its last "
+                      f"version change — add --plugin {name}[=LEVEL] to bump it")
 
     body = Path(notes).read_text(encoding="utf-8") if notes else draft_entries(subjects)
     print("\nCHANGELOG DRAFT" + ("" if notes else " (curate with --notes FILE)"))
@@ -1232,7 +1613,11 @@ def cmd_release(repo: Path, level: str, apply: bool = False,
     print("\nPLAN" + ("" if apply else " (dry run — pass --apply to write)"))
     for t in targets:
         print(f"  - set {t.label} = {new}")
-    print(f"  - insert changelog [{new}] - {date.today()}")
+    for b in plugin_bumps:
+        print(f"  - set {b.label} = {b.new}")
+    heading = _section_heading(_read(repo, changelog_path(repo)) or "", new,
+                               str(date.today()))
+    print(f"  - insert changelog {heading.lstrip('# ')}")
     print("  - commit" + (" (tag deferred: the lander tags the merge commit)"
                           if no_tag else f" and tag {tag}"))
 
@@ -1241,6 +1626,8 @@ def cmd_release(repo: Path, level: str, apply: bool = False,
 
     for t in targets:
         write_version(repo, t, new)
+    for b in plugin_bumps:
+        write_plugin_bump(repo, catalog.path, b)
     insert_section(repo, new, str(date.today()), body)
     git(repo, "add", "-A")
     git(repo, "commit", "-m", f"chore(release): {tag}")
@@ -1252,7 +1639,18 @@ def cmd_release(repo: Path, level: str, apply: bool = False,
 
 # --------------------------------------------------------------------------
 
+def _utf8_stdio() -> None:
+    # Windows pipes and consoles default to cp1252, which cannot encode every
+    # character a report prints (UnicodeEncodeError). Force UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_stdio()
     ap = argparse.ArgumentParser(prog="version_tool.py", description=__doc__)
     ap.add_argument("--repo", default=".", help="repository path (default: cwd)")
     sub = ap.add_subparsers(dest="verb", required=True)
@@ -1271,6 +1669,10 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--no-tag", action="store_true",
                    help="commit the bump but leave tagging to the lander, "
                         "which tags the merge commit once the PR has merged")
+    r.add_argument("--plugin", action="append", default=[], metavar="NAME[=LEVEL]",
+                   help="multi-plugin marketplace: also bump this plugin's "
+                        "marketplace entry and plugin.json (repeatable; LEVEL "
+                        "defaults to the release level)")
 
     args = ap.parse_args(argv)
     repo = Path(args.repo).resolve()

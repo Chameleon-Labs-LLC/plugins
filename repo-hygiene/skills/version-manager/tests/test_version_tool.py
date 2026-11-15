@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -133,11 +134,12 @@ def test_marketplace_plugin_version_is_detected(tmp_path):
     assert any("metadata.version" in n for n in notes)
 
 
-def test_marketplace_with_many_plugins_is_noted_not_tracked(tmp_path):
-    """Chameleon-Labs-LLC/plugins: seven plugins, each with its own version —
+def test_marketplace_with_many_plugins_and_no_catalog_version_is_noted(tmp_path):
+    """Several plugins, each with its own version, and no metadata.version —
     no single repo version exists, so the tool must not pick plugins[0]."""
     repo = new_repo(tmp_path)
     market = json.loads(MARKETPLACE)
+    del market["metadata"]["version"]
     market["plugins"].append(dict(market["plugins"][0],
                                   name="second-plugin", version="1.4.0"))
     commit(repo, "init",
@@ -145,6 +147,307 @@ def test_marketplace_with_many_plugins_is_noted_not_tracked(tmp_path):
     canonical, _mirrors, notes = vt.detect(repo)
     assert canonical is None
     assert any("2 plugins" in n for n in notes)
+
+
+# Chameleon-Labs-LLC/plugins shape: many bundled plugins, a catalog series in
+# metadata.version, and a changelog with unbracketed "## 0.3.0 — date" headings.
+MULTI_CHANGELOG = """# Changelog
+
+Marketplace releases, newest first.
+
+## 0.3.0 — 2026-08-02
+
+- three plugins
+"""
+
+
+def _multi_market(meta: str | None = "0.3.0") -> str:
+    market = json.loads(MARKETPLACE)
+    if meta is None:
+        del market["metadata"]["version"]
+    else:
+        market["metadata"]["version"] = meta
+    market["plugins"] = [
+        {"name": "alpha", "source": "./alpha", "description": "a",
+         "author": {"name": "Ex"}, "version": "0.1.0"},
+        {"name": "beta", "source": "./beta", "description": "b",
+         "version": "1.4.0"},
+        {"name": "remote", "source": {"source": "github", "repo": "x/y"},
+         "description": "r", "version": "2.0.0"},
+    ]
+    return json.dumps(market, indent=2) + "\n"
+
+
+def _plugin_json(name: str, version: str) -> str:
+    return json.dumps({"name": name, "version": version,
+                       "description": "d"}, indent=2) + "\n"
+
+
+def _multi_repo(tmp_path: Path, meta: str | None = "0.3.0",
+                beta_json: str = "1.4.0") -> Path:
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {
+        ".claude-plugin/marketplace.json": _multi_market(meta),
+        "alpha/.claude-plugin/plugin.json": _plugin_json("alpha", "0.1.0"),
+        "beta/.claude-plugin/plugin.json": _plugin_json("beta", beta_json),
+        "CHANGELOG.md": MULTI_CHANGELOG,
+    }, when="2026-08-02T10:00:00")
+    commit(repo, "feat(alpha): new skill", {"alpha/skill.md": "x\n"},
+           when="2026-09-01T10:00:00")
+    return repo
+
+
+def _versions(repo: Path) -> dict[str, str]:
+    data = json.loads((repo / ".claude-plugin/marketplace.json").read_text())
+    out = {"metadata": data["metadata"]["version"]}
+    out.update({p["name"]: p["version"] for p in data["plugins"]})
+    for name in ("alpha", "beta"):
+        pj = json.loads((repo / name / ".claude-plugin/plugin.json").read_text())
+        out[f"{name}/plugin.json"] = pj["version"]
+    return out
+
+
+def test_multi_plugin_marketplace_tracks_the_catalog_series(tmp_path):
+    repo = _multi_repo(tmp_path)
+    canonical, mirrors, notes = vt.detect(repo)
+    assert canonical is not None
+    assert canonical.kind == "marketplace_meta"
+    assert canonical.value == "0.3.0"
+    assert not mirrors
+    assert any("--plugin" in n for n in notes)
+
+
+def test_unbracketed_changelog_headings_are_parsed(tmp_path):
+    repo = _multi_repo(tmp_path)
+    assert vt.changelog_ledger(repo) == {"0.3.0": "2026-08-02"}
+
+
+def test_release_bumps_named_plugins_and_the_catalog(tmp_path):
+    repo = _multi_repo(tmp_path)
+    before = (repo / ".claude-plugin/marketplace.json").read_text()
+
+    assert vt.main(["--repo", str(repo), "release", "minor",
+                    "--plugin", "alpha", "--plugin", "beta=patch", "--apply"]) == 0
+
+    assert _versions(repo) == {
+        "metadata": "0.4.0",
+        "alpha": "0.2.0", "alpha/plugin.json": "0.2.0",
+        "beta": "1.4.1", "beta/plugin.json": "1.4.1",
+        "remote": "2.0.0",
+    }
+    after = (repo / ".claude-plugin/marketplace.json").read_text()
+    assert after.count("\n") == before.count("\n"), "file was reserialised"
+    assert '"author": {\n        "name": "Ex"\n      }' in after
+    changelog = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert f"## 0.4.0 — {date.today()}" in changelog, "heading style not kept"
+    assert "## [0.4.0]" not in changelog
+    assert changelog.index("## 0.4.0") < changelog.index("## 0.3.0")
+    assert "v0.4.0" in vt.existing_tags(repo)
+    assert not vt.is_dirty(repo)
+
+
+def test_release_plugin_refuses_when_plugin_json_disagrees(tmp_path, capsys):
+    repo = _multi_repo(tmp_path, beta_json="1.3.0")
+    before = _versions(repo)
+    assert vt.main(["--repo", str(repo), "release", "minor",
+                    "--plugin", "beta", "--apply"]) == 1
+    assert "beta" in capsys.readouterr().out
+    assert _versions(repo) == before
+
+
+def test_release_plugin_refuses_unknown_external_or_bad_level(tmp_path):
+    repo = _multi_repo(tmp_path)
+    before = _versions(repo)
+    for spec in ("gamma", "remote", "alpha=huge", "alpha,beta"):
+        assert vt.main(["--repo", str(repo), "release", "minor",
+                        "--plugin", spec, "--apply"]) == 1, spec
+    assert vt.main(["--repo", str(repo), "release", "minor",
+                    "--plugin", "alpha", "--plugin", "alpha", "--apply"]) == 1
+    assert _versions(repo) == before
+    assert "v0.4.0" not in vt.existing_tags(repo)
+
+
+def test_release_plugin_flag_needs_a_multi_plugin_marketplace(tmp_path):
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {"VERSION": "1.0.0\n"})
+    assert vt.main(["--repo", str(repo), "release", "patch",
+                    "--plugin", "alpha", "--apply"]) == 1
+    assert (repo / "VERSION").read_text() == "1.0.0\n"
+
+
+def test_release_names_changed_plugins_left_unbumped(tmp_path, capsys):
+    repo = _multi_repo(tmp_path)
+    assert vt.main(["--repo", str(repo), "release", "minor"]) == 0
+    out = capsys.readouterr().out
+    assert "alpha" in out and "--plugin alpha" in out
+    assert "--plugin beta" not in out, "beta has no commits of its own"
+
+
+def test_check_lists_plugin_versions_and_flags_drift(tmp_path, capsys):
+    repo = _multi_repo(tmp_path, beta_json="1.3.0")
+    assert vt.main(["--repo", str(repo), "check"]) == 0
+    out = capsys.readouterr().out
+    assert "plugin: alpha = 0.1.0" in out
+    assert "plugin: beta = 1.4.0" in out and "DISAGREES" in out
+
+
+def test_catalog_ledger_reads_the_metadata_series(tmp_path):
+    """A catalog's history is its metadata.version series, not plugins[0]."""
+    repo = new_repo(tmp_path)
+    for i, meta in enumerate(("0.1.0", "0.2.0", "0.3.0")):
+        commit(repo, f"chore(release): v{meta}",
+               {".claude-plugin/marketplace.json": _multi_market(meta)},
+               when=f"2026-08-0{i + 1}T10:00:00")
+    canonical, _mirrors, _notes = vt.detect(repo)
+    assert canonical.kind == "marketplace_meta"
+    assert [e.version for e in vt.git_ledger(repo, canonical)] == [
+        "0.1.0", "0.2.0", "0.3.0"]
+
+
+def test_release_plugin_touches_only_the_entrys_own_version(tmp_path):
+    """A nested source pin equal to the entry's version stays put, and a
+    plugin whose entry repeats "version" is refused before anything moves."""
+    repo = _multi_repo(tmp_path)
+    market = json.loads(_multi_market())
+    market["plugins"][1]["source"] = "./beta"
+    market["plugins"][0]["source"] = "./alpha"
+    market["plugins"][1]["homepage"] = {"version": "1.4.0"}
+    commit(repo, "nested", {
+        ".claude-plugin/marketplace.json": json.dumps(market, indent=2) + "\n"})
+    assert vt.main(["--repo", str(repo), "release", "patch",
+                    "--plugin", "beta", "--apply"]) == 0
+    data = json.loads((repo / ".claude-plugin/marketplace.json").read_text())
+    assert data["plugins"][1]["version"] == "1.4.1"
+    assert data["plugins"][1]["homepage"]["version"] == "1.4.0"
+
+    text = (repo / ".claude-plugin/marketplace.json").read_text()
+    twice = text.replace('"version": "0.1.0"',
+                         '"version": "0.1.0",\n      "version": "0.1.0"', 1)
+    commit(repo, "twice", {".claude-plugin/marketplace.json": twice})
+    assert vt.main(["--repo", str(repo), "release", "patch",
+                    "--plugin", "alpha", "--apply"]) == 1
+    assert (repo / ".claude-plugin/marketplace.json").read_text() == twice
+
+
+def test_release_plugin_works_when_package_json_is_canonical(tmp_path):
+    """Codex review: a versioned package.json outranks the catalog, and
+    --plugin used to refuse because the canonical was not the catalog."""
+    repo = _multi_repo(tmp_path)
+    commit(repo, "npm", {"package.json": '{"name": "x", "version": "0.3.0"}\n'})
+    canonical, mirrors, _ = vt.detect(repo)
+    assert canonical.kind == "package_json"
+    assert any(m.kind == "marketplace_meta" for m in mirrors)
+    assert vt.main(["--repo", str(repo), "release", "minor",
+                    "--plugin", "alpha", "--apply"]) == 0
+    assert _versions(repo)["alpha/plugin.json"] == "0.2.0"
+    assert _versions(repo)["metadata"] == "0.4.0"
+
+
+def _shared_repo(tmp_path: Path) -> Path:
+    """Two catalog entries whose source is one folder, so one plugin.json."""
+    repo = _multi_repo(tmp_path)
+    market = json.loads(_multi_market())
+    market["plugins"][0]["source"] = market["plugins"][1]["source"] = "./alpha"
+    market["plugins"][1]["version"] = "0.1.0"
+    commit(repo, "share", {
+        ".claude-plugin/marketplace.json": json.dumps(market, indent=2) + "\n"})
+    return repo
+
+
+def test_release_plugin_refuses_different_targets_for_one_manifest(tmp_path, capsys):
+    """CodeRabbit: alpha=minor and beta=patch over one shared plugin.json
+    passed, and the second write left alpha's entry disagreeing with it."""
+    repo = _shared_repo(tmp_path)
+    before = {p: (repo / p).read_text() for p in (
+        ".claude-plugin/marketplace.json", "alpha/.claude-plugin/plugin.json")}
+    for args in (["--plugin", "alpha=minor", "--plugin", "beta=patch"],
+                 ["--plugin", "alpha"]):        # beta left behind
+        assert vt.main(["--repo", str(repo), "release", "minor", *args,
+                        "--apply"]) == 1, args
+        assert {p: (repo / p).read_text() for p in before} == before
+    assert "different versions" in capsys.readouterr().out
+    assert not vt.existing_tags(repo)
+
+
+def test_release_plugin_allows_one_target_for_a_shared_manifest(tmp_path):
+    repo = _shared_repo(tmp_path)
+    assert vt.main(["--repo", str(repo), "release", "minor", "--plugin", "alpha",
+                    "--plugin", "beta", "--apply"]) == 0
+    data = json.loads((repo / ".claude-plugin/marketplace.json").read_text())
+    assert [p["version"] for p in data["plugins"][:2]] == ["0.2.0", "0.2.0"]
+    assert json.loads((repo / "alpha/.claude-plugin/plugin.json").read_text()
+                      )["version"] == "0.2.0"
+
+
+def test_catalog_history_survives_a_canonical_package_json(tmp_path, capsys):
+    """CodeRabbit: once a versioned package.json outranked the catalog, the
+    ledger dropped the catalog's earlier releases and backfill could treat
+    the repo as a placeholder."""
+    repo = new_repo(tmp_path)
+    for i, meta in enumerate(("0.1.0", "0.2.0", "0.3.0")):
+        commit(repo, f"chore(release): v{meta}",
+               {".claude-plugin/marketplace.json": _multi_market(meta)},
+               when=f"2026-08-0{i + 1}T10:00:00")
+    commit(repo, "npm", {"package.json": '{"name": "x", "version": "0.3.0"}\n'},
+           when="2026-08-04T10:00:00")
+    canonical, _mirrors, _notes = vt.detect(repo)
+    assert canonical.kind == "package_json"
+    assert [e.version for e in vt.git_ledger(repo, canonical)] == [
+        "0.1.0", "0.2.0", "0.3.0"]
+    assert vt.main(["--repo", str(repo), "check"]) == 0
+    assert "real record — 3 bumps in history" in capsys.readouterr().out
+
+
+def test_release_plugin_refuses_a_manifest_it_cannot_use(tmp_path, capsys):
+    """Codex review: a plugin.json that is a link out of the repo used to read
+    as "no manifest", so only the entry moved and the manifest went stale."""
+    repo = _multi_repo(tmp_path)
+    outside = tmp_path / "theirs.json"
+    outside.write_text(_plugin_json("alpha", "0.1.0"), encoding="utf-8")
+    link = repo / "alpha/.claude-plugin/plugin.json"
+    link.unlink()
+    if not _symlink(link, outside, is_dir=False):
+        pytest.skip("cannot create symlinks here")
+    vt.git(repo, "add", "-A")
+    vt.git(repo, "commit", "-q", "-m", "chore: link the manifest")
+    before = (repo / ".claude-plugin/marketplace.json").read_text()
+    assert vt.main(["--repo", str(repo), "release", "patch",
+                    "--plugin", "alpha", "--apply"]) == 1
+    assert "link out of the repository" in capsys.readouterr().out
+    assert (repo / ".claude-plugin/marketplace.json").read_text() == before
+    assert outside.read_text(encoding="utf-8") == _plugin_json("alpha", "0.1.0")
+
+
+def test_unbracketed_prerelease_heading_is_not_the_stable_release(tmp_path):
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {"CHANGELOG.md": "# Changelog\n\n"
+                          "## 1.2.3-rc.1 - 2026-01-01\n\n- rc\n\n"
+                          "## 1.2.2 — 2025-12-01\n\n- old\n"})
+    assert vt.changelog_ledger(repo) == {"1.2.2": "2025-12-01"}
+
+
+def test_a_description_edit_is_not_a_plugin_version_change(tmp_path, capsys):
+    """Codex review: a one-line plugin.json whose description changed matched
+    a "version" line search and hid the plugin's unreleased commits."""
+    repo = _multi_repo(tmp_path)   # alpha has a commit after its manifest
+    commit(repo, "docs(alpha): describe", {
+        "alpha/.claude-plugin/plugin.json":
+            '{"name": "alpha", "version": "0.1.0", "description": "new"}\n'})
+    assert vt.main(["--repo", str(repo), "release", "minor"]) == 0
+    assert "--plugin alpha" in capsys.readouterr().out
+
+
+def test_release_plugin_refuses_a_source_outside_the_repo(tmp_path, capsys):
+    repo = _multi_repo(tmp_path)
+    market = json.loads(_multi_market())
+    market["plugins"][0]["source"] = "../alpha"
+    commit(repo, "escape", {
+        ".claude-plugin/marketplace.json": json.dumps(market, indent=2) + "\n"})
+    before = (repo / ".claude-plugin/marketplace.json").read_text()
+    assert vt.main(["--repo", str(repo), "release", "patch",
+                    "--plugin", "alpha", "--apply"]) == 1
+    assert "outside the repository" in capsys.readouterr().out
+    assert (repo / ".claude-plugin/marketplace.json").read_text() == before
 
 
 def test_release_bumps_marketplace_plugin_not_metadata(tmp_path):
