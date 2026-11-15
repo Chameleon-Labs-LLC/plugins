@@ -343,6 +343,61 @@ def test_release_plugin_works_when_package_json_is_canonical(tmp_path):
     assert _versions(repo)["metadata"] == "0.4.0"
 
 
+def _shared_repo(tmp_path: Path) -> Path:
+    """Two catalog entries whose source is one folder, so one plugin.json."""
+    repo = _multi_repo(tmp_path)
+    market = json.loads(_multi_market())
+    market["plugins"][0]["source"] = market["plugins"][1]["source"] = "./alpha"
+    market["plugins"][1]["version"] = "0.1.0"
+    commit(repo, "share", {
+        ".claude-plugin/marketplace.json": json.dumps(market, indent=2) + "\n"})
+    return repo
+
+
+def test_release_plugin_refuses_different_targets_for_one_manifest(tmp_path, capsys):
+    """CodeRabbit: alpha=minor and beta=patch over one shared plugin.json
+    passed, and the second write left alpha's entry disagreeing with it."""
+    repo = _shared_repo(tmp_path)
+    before = {p: (repo / p).read_text() for p in (
+        ".claude-plugin/marketplace.json", "alpha/.claude-plugin/plugin.json")}
+    for args in (["--plugin", "alpha=minor", "--plugin", "beta=patch"],
+                 ["--plugin", "alpha"]):        # beta left behind
+        assert vt.main(["--repo", str(repo), "release", "minor", *args,
+                        "--apply"]) == 1, args
+        assert {p: (repo / p).read_text() for p in before} == before
+    assert "different versions" in capsys.readouterr().out
+    assert not vt.existing_tags(repo)
+
+
+def test_release_plugin_allows_one_target_for_a_shared_manifest(tmp_path):
+    repo = _shared_repo(tmp_path)
+    assert vt.main(["--repo", str(repo), "release", "minor", "--plugin", "alpha",
+                    "--plugin", "beta", "--apply"]) == 0
+    data = json.loads((repo / ".claude-plugin/marketplace.json").read_text())
+    assert [p["version"] for p in data["plugins"][:2]] == ["0.2.0", "0.2.0"]
+    assert json.loads((repo / "alpha/.claude-plugin/plugin.json").read_text()
+                      )["version"] == "0.2.0"
+
+
+def test_catalog_history_survives_a_canonical_package_json(tmp_path, capsys):
+    """CodeRabbit: once a versioned package.json outranked the catalog, the
+    ledger dropped the catalog's earlier releases and backfill could treat
+    the repo as a placeholder."""
+    repo = new_repo(tmp_path)
+    for i, meta in enumerate(("0.1.0", "0.2.0", "0.3.0")):
+        commit(repo, f"chore(release): v{meta}",
+               {".claude-plugin/marketplace.json": _multi_market(meta)},
+               when=f"2026-08-0{i + 1}T10:00:00")
+    commit(repo, "npm", {"package.json": '{"name": "x", "version": "0.3.0"}\n'},
+           when="2026-08-04T10:00:00")
+    canonical, _mirrors, _notes = vt.detect(repo)
+    assert canonical.kind == "package_json"
+    assert [e.version for e in vt.git_ledger(repo, canonical)] == [
+        "0.1.0", "0.2.0", "0.3.0"]
+    assert vt.main(["--repo", str(repo), "check"]) == 0
+    assert "real record — 3 bumps in history" in capsys.readouterr().out
+
+
 def test_release_plugin_refuses_a_manifest_it_cannot_use(tmp_path, capsys):
     """Codex review: a plugin.json that is a link out of the repo used to read
     as "no manifest", so only the entry moved and the manifest went stale."""

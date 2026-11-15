@@ -42,8 +42,9 @@ re-cut. Merge the base branch into the PR first, then:
 ```bash
 PY=python3; "$PY" -c '' 2>/dev/null || PY=python
 T="${CLAUDE_PLUGIN_ROOT}/skills/version-manager/version_tool.py"
+NOTES="/abs/path/to/notes.md"   # the curated changelog body (see below)
 "$PY" "$T" --repo /abs/path/to/repo release minor            # dry run: read the draft
-"$PY" "$T" --repo /abs/path/to/repo release minor --notes <scratchpad>/notes.md --apply --no-tag
+"$PY" "$T" --repo /abs/path/to/repo release minor --notes "$NOTES" --apply --no-tag
 ```
 
 `--no-tag` commits the bump without tagging it. Tag the merge commit once the
@@ -68,6 +69,8 @@ step — generated draft, curated release.
 **Adopting the tool in a repo for the first time:**
 
 ```bash
+PY=python3; "$PY" -c '' 2>/dev/null || PY=python
+T="${CLAUDE_PLUGIN_ROOT}/skills/version-manager/version_tool.py"
 "$PY" "$T" --repo /abs/path check                    # see what is wrong
 "$PY" "$T" --repo /abs/path backfill                 # dry run
 "$PY" "$T" --repo /abs/path backfill --apply         # tags + changelog gaps
@@ -100,7 +103,10 @@ has its own `.claude-plugin/plugin.json`, that file's `version` is a mirror.
 
 A **multi-plugin** marketplace with a `metadata.version` is a catalog: that
 `metadata.version` is canonical and drives the changelog and the `v*` tag,
-while each plugin keeps its own version. Bump plugins in the same release with
+while each plugin keeps its own version. A versioned root `package.json` or
+`pyproject.toml` outranks it: that file is then canonical and drives the
+changelog and tag, and the catalog's `metadata.version` is a mirror that moves
+with it (`--plugin` still works through the catalog). Bump plugins in the same release with
 repeatable `--plugin NAME[=LEVEL]` (LEVEL defaults to the release level). The
 flag updates the plugin entry's own `version` and its
 `<plugin>/.claude-plugin/plugin.json` together. It refuses, before writing
@@ -111,8 +117,11 @@ changed that the release does not name. A multi-plugin marketplace without
 `metadata.version` has no repo version and is skipped.
 
 ```bash
+PY=python3; "$PY" -c '' 2>/dev/null || PY=python
+T="${CLAUDE_PLUGIN_ROOT}/skills/version-manager/version_tool.py"
+NOTES="/abs/path/to/notes.md"
 "$PY" "$T" --repo /abs/path release minor \
-    --plugin scan-source --plugin docs-toolkit=patch --notes <scratchpad>/notes.md
+    --plugin scan-source --plugin docs-toolkit=patch --notes "$NOTES"
 ```
 
 The changelog keeps its existing heading style: Keep a Changelog

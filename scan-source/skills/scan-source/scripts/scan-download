@@ -81,6 +81,8 @@ with_timeout() {
   local secs="$1"; shift
   if have timeout;  then timeout  "${secs}s" "$@"; return; fi
   if have gtimeout; then gtimeout "${secs}s" "$@"; return; fi
+  # GNU timeout treats 0 as "no deadline"; a 0-second watchdog would kill at once.
+  if [ "$secs" = 0 ]; then "$@"; return; fi
   local marker pid watcher rc
   marker="$(mktemp "${TMPDIR:-/tmp}/scan-download-timeout.XXXXXX")"; rm -f "$marker"
   "$@" & pid=$!

@@ -857,6 +857,25 @@ def resolve_plugin_bumps(repo: Path, rel: Path, specs: list[str],
                 continue
         bumps.append(PluginBump(name, old, fmt_version(bump(current, level)),
                                 manifest if own is not None else None))
+
+    # Two entries can point at one folder, and so share one plugin.json. Every
+    # entry that shares a manifest being written must move to the same
+    # version, or the release commits an entry that disagrees with it.
+    targets: dict[Path, dict[str, str]] = {}
+    for b in bumps:
+        if b.manifest is not None:
+            targets.setdefault((repo / b.manifest).resolve(), {})[b.name] = b.new
+    for shared in targets.values():
+        if len(set(shared.values())) > 1:
+            errors.append("one plugin.json, different versions: " + ", ".join(
+                f"{n} -> {v}" for n, v in sorted(shared.items())))
+    for name, found in entries.items():
+        for entry, manifest in found:
+            if manifest is None or any(b.name == name for b in bumps):
+                continue
+            if (repo / manifest).resolve() in targets:
+                errors.append(f"{name}: shares {manifest} with a plugin being "
+                              "bumped; name it with --plugin too")
     return bumps, errors
 
 
@@ -946,9 +965,23 @@ def _history_paths(repo: Path, canonical: Location | None) -> list[Path]:
                 and not any(d in p.parts for d in SKIP_DIRS)
                 and len(p.parts) <= MAX_DEPTH):
             paths.append(p)
-    if canonical and canonical.path not in paths:
-        paths.append(canonical.path)
+    # The detected homes go first so the cap below never drops them. A
+    # catalog keeps its history even when a versioned package.json or
+    # pyproject.toml outranks it and it is only a mirror.
+    homes = [canonical.path] if canonical else []
+    if _head_catalog(repo) and Path(MARKETPLACE_PATH) not in homes:
+        homes.append(Path(MARKETPLACE_PATH))
+    paths = homes + [p for p in paths if p not in homes]
     return paths[:30]
+
+
+def _head_catalog(repo: Path) -> bool:
+    """True when the working tree's marketplace is a catalog that detect()
+    tracks: several plugins and an X.Y.Z metadata.version."""
+    text = _read(repo, Path(MARKETPLACE_PATH))
+    if not text or _duplicate_key(text, "marketplace_meta"):
+        return False
+    return _manifest_version(text, "marketplace_meta") is not None
 
 
 def _kind_for(path: Path) -> str:
@@ -989,6 +1022,7 @@ def git_ledger(repo: Path, canonical: Location | None) -> list[Entry]:
     paths = _history_paths(repo, canonical)
     if not paths:
         return []
+    catalog = _head_catalog(repo)
 
     hits: dict[str, Entry] = {}
     order: list[tuple[int, str]] = []
@@ -1015,9 +1049,9 @@ def git_ledger(repo: Path, canonical: Location | None) -> list[Entry]:
             if line.startswith("+++ b/"):
                 path = Path(line[6:].strip())
                 current_kind = _kind_for(path)
-                if current_kind == "marketplace" and canonical is not None \
-                        and canonical.kind == "marketplace_meta":
-                    # A catalog's history is its metadata.version series.
+                if current_kind == "marketplace" and catalog:
+                    # A catalog's history is its metadata.version series,
+                    # whether it is canonical or a mirror.
                     current_kind = "marketplace_meta"
                 if current_kind in SPAN_KINDS:
                     # One added line cannot say WHICH "version" key it is

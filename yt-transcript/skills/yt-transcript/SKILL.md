@@ -79,7 +79,7 @@ Report the saved file path (the script logs `INFO: Saved to: ...` on the last st
 
 ## Failure modes
 
-- **IP-blocked by YouTube** — surface the error verbatim; don't retry. If the venv has a newer `youtube-transcript-api` that got blocked, suggest pinning to an older version inside the venv (`.venv_linux/bin/python -m pip install 'youtube-transcript-api<1.0'`; on Windows `.venv/Scripts/python.exe -m pip ...`) or running from a different IP where an older version already works.
+- **IP-blocked by YouTube** — surface the error verbatim; don't retry. If the venv has a newer `youtube-transcript-api` that got blocked, suggest pinning to an older version inside the venv `run.sh` selected (`<venv python> -m pip install 'youtube-transcript-api<1.0'`; `<venv python>` is that venv's interpreter, picked by the order above) or running from a different IP where an older version already works.
 - **Transcripts disabled on the video** — script exits non-zero with a clear error; surface it and stop.
 - **Bare ID not 11 chars** — ask the user to confirm the URL or ID rather than guessing.
 - **`-r -m full` missing deps** — tell the user to run `<venv python> -m pip install "deepmultilingualpunctuation>=1.0" "transformers<5" nltk` with the venv's interpreter, or drop back to `-m light`.
