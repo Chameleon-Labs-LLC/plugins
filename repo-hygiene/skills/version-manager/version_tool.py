@@ -750,6 +750,31 @@ class PluginBump:
         return f"plugin {self.name} ({where})"
 
 
+def _manifest_rejected(repo: Path, entry: dict) -> bool:
+    """True when the plugin's folder has a plugin.json that
+    _plugin_manifest_for() will not use (a link out of the repo, or not a
+    regular file). Treating that as "no manifest" would bump the entry alone
+    and leave the manifest stale."""
+    source = entry.get("source")
+    if not isinstance(source, str):
+        return False
+    rel = Path(os.path.normpath((Path(source) / PLUGIN_MANIFEST).as_posix()))
+    if rel.is_absolute() or ".." in rel.parts:
+        return False    # the source itself is refused separately
+    return os.path.lexists(repo / rel) and _plugin_manifest_for(repo, entry) is None
+
+
+def _catalog_location(canonical: Location | None,
+                      mirrors: list[Location]) -> Location | None:
+    """The multi-plugin catalog among the detected locations. It is usually
+    canonical, but a versioned package.json or pyproject.toml outranks it;
+    plugin bumps still go through the catalog then."""
+    for loc in ([canonical] if canonical else []) + mirrors:
+        if loc.kind == "marketplace_meta":
+            return loc
+    return None
+
+
 def _catalog_plugins(repo: Path, rel: Path) -> list[tuple[dict, Path | None]]:
     """(entry, own manifest) for every plugin entry of the catalog."""
     try:
@@ -804,6 +829,10 @@ def resolve_plugin_bumps(repo: Path, rel: Path, specs: list[str],
         if not _source_inside(repo, source):
             errors.append(f"{name}: source {source!r} is outside the repository")
             continue
+        if _manifest_rejected(repo, entry):
+            errors.append(f"{name}: its .claude-plugin/plugin.json is a link out "
+                          "of the repository or not a regular file")
+            continue
         try:
             vspan = _entry_version_span(text, spans[name][0][0])
         except DuplicateKey:
@@ -847,6 +876,20 @@ def write_plugin_bump(repo: Path, rel: Path, b: PluginBump) -> None:
         write_version(repo, Location(b.manifest, "plugin_json", b.old), b.new)
 
 
+def _last_version_change(repo: Path, manifest: Path) -> str | None:
+    """The newest commit that changed the manifest's top-level version.
+    Edits to other keys (a description on the same line) do not count."""
+    shas = git(repo, "log", "--reverse", "--format=%H", "--",
+               manifest.as_posix(), check=False).split()
+    last, seen = None, None
+    for sha in shas:
+        text = _file_at(repo, sha, manifest)
+        version = _extract(text, "plugin_json") if text else None
+        if version != seen:
+            last, seen = sha, version
+    return last
+
+
 def plugins_changed_since_bump(repo: Path, rel: Path) -> list[tuple[str, int]]:
     """Local plugins with commits in their folder after their plugin.json
     version last changed."""
@@ -857,8 +900,7 @@ def plugins_changed_since_bump(repo: Path, rel: Path) -> list[tuple[str, int]]:
         pdir = manifest.parent.parent
         if pdir == Path("."):
             continue    # a root plugin: every commit is "its" commit
-        last = git(repo, "log", "-1", "--format=%H", '-G"version"', "--",
-                   manifest.as_posix(), check=False).strip()
+        last = _last_version_change(repo, manifest)
         if not last:
             continue
         n = git(repo, "rev-list", "--count", f"{last}..HEAD", "--",
@@ -1005,7 +1047,7 @@ def git_ledger(repo: Path, canonical: Location | None) -> list[Entry]:
 # Keep a Changelog "## [1.2.0] - 2026-01-01", or the unbracketed
 # "## 1.2.0 — 2026-01-01" some catalogs use. New sections copy the file's style.
 CHANGELOG_HEADING = re.compile(
-    r"^##\s*(?P<ob>\[)?(?P<v>\d+\.\d+\.\d+)(?(ob)\])"
+    r"^##\s*(?P<ob>\[)?(?P<v>\d+\.\d+\.\d+)(?(ob)\]|(?=\s|$))"
     r"\s*(?:(?P<sep>[-–—])\s*(?P<d>\d{4}-\d{2}-\d{2}))?", re.M)
 
 
@@ -1293,8 +1335,9 @@ def cmd_check(repo: Path, **_: object) -> int:
         flag = "" if m.value == (canonical.value if canonical else None) else "  <-- DISAGREES"
         kind = "display" if m.mirror_only else "mirror"
         print(f"  {kind}: {m.label} = {m.value}{flag}")
-    if canonical and canonical.kind == "marketplace_meta":
-        for entry, manifest in _catalog_plugins(repo, canonical.path):
+    catalog = _catalog_location(canonical, mirrors)
+    if catalog is not None:
+        for entry, manifest in _catalog_plugins(repo, catalog.path):
             v = entry.get("version")
             if not isinstance(entry.get("source"), str):
                 print(f"  plugin: {entry.get('name')} = {v}  (external)")
@@ -1494,13 +1537,13 @@ def cmd_release(repo: Path, level: str, apply: bool = False,
         return 1
 
     plugin_bumps: list[PluginBump] = []
-    is_catalog = canonical.kind == "marketplace_meta"
-    if plugin and not is_catalog:
+    catalog = _catalog_location(canonical, mirrors)
+    if plugin and catalog is None:
         print("  REFUSED: --plugin needs a multi-plugin marketplace "
               "(.claude-plugin/marketplace.json with metadata.version)")
         return 1
     if plugin:
-        plugin_bumps, errors = resolve_plugin_bumps(repo, canonical.path,
+        plugin_bumps, errors = resolve_plugin_bumps(repo, catalog.path,
                                                     plugin, level)
         if errors:
             print("  REFUSED: cannot bump the named plugins:")
@@ -1521,9 +1564,9 @@ def cmd_release(repo: Path, level: str, apply: bool = False,
     print(f"  {len(subjects)} commits in {rng}")
     for b in plugin_bumps:
         print(f"  {b.name}: {b.old} -> {b.new}")
-    if is_catalog:
+    if catalog is not None:
         named = {b.name for b in plugin_bumps}
-        for name, n in plugins_changed_since_bump(repo, canonical.path):
+        for name, n in plugins_changed_since_bump(repo, catalog.path):
             if name not in named:
                 print(f"  note: plugin {name} has {n} commit(s) since its last "
                       f"version change — add --plugin {name}[=LEVEL] to bump it")
@@ -1550,7 +1593,7 @@ def cmd_release(repo: Path, level: str, apply: bool = False,
     for t in targets:
         write_version(repo, t, new)
     for b in plugin_bumps:
-        write_plugin_bump(repo, canonical.path, b)
+        write_plugin_bump(repo, catalog.path, b)
     insert_section(repo, new, str(date.today()), body)
     git(repo, "add", "-A")
     git(repo, "commit", "-m", f"chore(release): {tag}")

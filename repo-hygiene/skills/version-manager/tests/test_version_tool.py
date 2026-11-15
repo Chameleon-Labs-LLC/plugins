@@ -329,6 +329,59 @@ def test_release_plugin_touches_only_the_entrys_own_version(tmp_path):
     assert (repo / ".claude-plugin/marketplace.json").read_text() == twice
 
 
+def test_release_plugin_works_when_package_json_is_canonical(tmp_path):
+    """Codex review: a versioned package.json outranks the catalog, and
+    --plugin used to refuse because the canonical was not the catalog."""
+    repo = _multi_repo(tmp_path)
+    commit(repo, "npm", {"package.json": '{"name": "x", "version": "0.3.0"}\n'})
+    canonical, mirrors, _ = vt.detect(repo)
+    assert canonical.kind == "package_json"
+    assert any(m.kind == "marketplace_meta" for m in mirrors)
+    assert vt.main(["--repo", str(repo), "release", "minor",
+                    "--plugin", "alpha", "--apply"]) == 0
+    assert _versions(repo)["alpha/plugin.json"] == "0.2.0"
+    assert _versions(repo)["metadata"] == "0.4.0"
+
+
+def test_release_plugin_refuses_a_manifest_it_cannot_use(tmp_path, capsys):
+    """Codex review: a plugin.json that is a link out of the repo used to read
+    as "no manifest", so only the entry moved and the manifest went stale."""
+    repo = _multi_repo(tmp_path)
+    outside = tmp_path / "theirs.json"
+    outside.write_text(_plugin_json("alpha", "0.1.0"), encoding="utf-8")
+    link = repo / "alpha/.claude-plugin/plugin.json"
+    link.unlink()
+    if not _symlink(link, outside, is_dir=False):
+        pytest.skip("cannot create symlinks here")
+    vt.git(repo, "add", "-A")
+    vt.git(repo, "commit", "-q", "-m", "chore: link the manifest")
+    before = (repo / ".claude-plugin/marketplace.json").read_text()
+    assert vt.main(["--repo", str(repo), "release", "patch",
+                    "--plugin", "alpha", "--apply"]) == 1
+    assert "link out of the repository" in capsys.readouterr().out
+    assert (repo / ".claude-plugin/marketplace.json").read_text() == before
+    assert outside.read_text(encoding="utf-8") == _plugin_json("alpha", "0.1.0")
+
+
+def test_unbracketed_prerelease_heading_is_not_the_stable_release(tmp_path):
+    repo = new_repo(tmp_path)
+    commit(repo, "init", {"CHANGELOG.md": "# Changelog\n\n"
+                          "## 1.2.3-rc.1 - 2026-01-01\n\n- rc\n\n"
+                          "## 1.2.2 — 2025-12-01\n\n- old\n"})
+    assert vt.changelog_ledger(repo) == {"1.2.2": "2025-12-01"}
+
+
+def test_a_description_edit_is_not_a_plugin_version_change(tmp_path, capsys):
+    """Codex review: a one-line plugin.json whose description changed matched
+    a "version" line search and hid the plugin's unreleased commits."""
+    repo = _multi_repo(tmp_path)   # alpha has a commit after its manifest
+    commit(repo, "docs(alpha): describe", {
+        "alpha/.claude-plugin/plugin.json":
+            '{"name": "alpha", "version": "0.1.0", "description": "new"}\n'})
+    assert vt.main(["--repo", str(repo), "release", "minor"]) == 0
+    assert "--plugin alpha" in capsys.readouterr().out
+
+
 def test_release_plugin_refuses_a_source_outside_the_repo(tmp_path, capsys):
     repo = _multi_repo(tmp_path)
     market = json.loads(_multi_market())
