@@ -4,6 +4,19 @@ Marketplace releases, newest first. Versions track `metadata.version` in
 `.claude-plugin/marketplace.json`; individual plugins version independently in
 their own `plugin.json`.
 
+## 0.4.0 — 2026-11-15
+
+### Changed
+- Plugin versions moved so installed copies pick up the cross-platform work from #3: scan-source 0.2.0, yt-transcript 0.2.0, repo-hygiene 0.4.0, docs-toolkit 0.1.1. Claude Code only updates an installed plugin when its version changes.
+
+### Added (shipped in #3, released here)
+- scan-source: runs on Linux and macOS, and on Windows through WSL (native Windows shells are refused with a pointer to WSL); new `prepare-share.py` helper.
+- yt-transcript: cross-platform runner.
+- repo-hygiene: version-manager understands multi-plugin marketplaces (`release --plugin NAME[=LEVEL]`), refuses conflicting bumps of a shared manifest, and writes UTF-8 output; land-pr, repo-doctor and unify-agents-md docs updated for native Windows.
+
+### Fixed
+- docs-toolkit: update-code-map reference files normalized to LF; `extract_symbols.py` handles Windows path separators and writes UTF-8 on Windows consoles.
+
 ## 0.3.0 — 2026-08-02
 
 - **Four new bundled plugins:**
