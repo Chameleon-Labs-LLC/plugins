@@ -52,6 +52,7 @@ The bundled plugins run on Linux, macOS (Intel and Apple silicon), and native Wi
 | `docs-toolkit` | Generate and maintain project documentation: user-facing feature docs + sitemap, developer/API docs, feature inventories, a verified CodeMap.md, and `.raginclude` files for RAG indexing. | [bundled in this repo](./docs-toolkit) |
 | `yt-transcript` | Download YouTube transcripts from any URL form or bare video ID, with the Python venv lifecycle handled by a bundled runner. | [bundled in this repo](./yt-transcript) |
 | `model-registry` | Wire any project to a daily-refreshed public registry of current LLM model IDs (Claude, GPT, Gemini) so code stops hardcoding model names that go stale. | [bundled in this repo](./model-registry) |
+| `screenshot-reader` | A cheap Haiku subagent reads screenshots and returns exact text, so your main coding model never loads the image. Saves the most on batches of screenshots and narrow questions. | [lelandg/screenshot-reader](https://github.com/lelandg/screenshot-reader) |
 
 Looking for a knowledge-graph skill? We recommend [Graphify](https://github.com/Graphify-Labs/graphify) by Safi Shamsi (`uv tool install graphifyy`) — it ships its own Claude Code skill, so we don't repackage it here.
 
