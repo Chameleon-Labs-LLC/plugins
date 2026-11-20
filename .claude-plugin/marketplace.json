@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Plugins from Chameleon Labs — skills, agents, and tooling for Claude Code.",
-    "version": "0.5.0"
+    "version": "0.5.1"
   },
   "plugins": [
     {
@@ -201,8 +201,8 @@
         "source": "github",
         "repo": "lelandg/screenshot-reader"
       },
-      "description": "Keeps screenshots out of your expensive coding model's context: a cheap Haiku subagent reads each image and returns exact text (errors, code, UI state, layout). A skill tells the main model to delegate; a guard hook enforces it.",
-      "version": "0.1.0",
+      "description": "Keeps screenshots out of your expensive coding model's context: a cheap subagent (Haiku for text, Sonnet for visual questions) reads each image and returns exact text (errors, code, UI state, layout). A skill tells the main model to delegate; a guard hook enforces it.",
+      "version": "0.2.0",
       "author": {
         "name": "Leland Green"
       },

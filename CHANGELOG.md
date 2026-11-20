@@ -4,6 +4,10 @@ Marketplace releases, newest first. Versions track `metadata.version` in
 `.claude-plugin/marketplace.json`; individual plugins version independently in
 their own `plugin.json`.
 
+## 0.5.1 — 2026-11-20
+
+- `screenshot-reader` 0.2.0: visual questions about screenshots go to a Sonnet reader.
+
 ## 0.5.0 — 2026-11-20
 
 - New plugin in the marketplace: `screenshot-reader`. A Haiku subagent reads screenshots for your main model and returns exact text.
