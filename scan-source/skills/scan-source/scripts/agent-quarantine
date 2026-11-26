@@ -66,11 +66,46 @@ esac
 
 exists() { [ -e "$1" ] || [ -L "$1" ]; }
 
-# find_live <repo> : NUL-separated agent files/folders still in place. Does not
-# descend into a match, .git, the quarantine itself, or scan reports.
+glob_escape() { printf '%s' "$1" | sed 's/[][*?\\]/\\&/g'; }
+
+# find_live <repo> : NUL-separated agent files/folders still in place. Skips only
+# the repo's own top-level .git; everything else is searched, the quarantine
+# included (a stored item never keeps a bare agent name, so a match there was
+# planted), because a name-based skip anywhere is a hiding place.
 find_live() {
-  find "$1" -mindepth 1 \( -name .git -o -name "$STORE_NAME" -o -name .scan-reports \) -prune \
+  find "$1" -mindepth 1 -path "$(glob_escape "$1")/.git" -prune \
     -o \( "${NAME_EXPR[@]}" \) -print0 -prune
+}
+
+# safe_rel <rel> : a relative path with no empty, "." or ".." parts and no tab
+# or newline. Manifest lines and moves must pass it.
+safe_rel() {
+  case "$1" in ''|/*|*$'\t'*|*$'\n'*) return 1 ;; esac
+  case "/$1/" in */../*|*/./*|*//*) return 1 ;; esac
+  return 0
+}
+
+# in_repo <repo-real> <abs-path> : the nearest existing folder at or above the
+# path's parent resolves (symlinks followed) inside the repo.
+in_repo() {
+  local real="$1" d
+  d="$(dirname "$2")"
+  while [ ! -d "$d" ]; do d="$(dirname "$d")"; done
+  d="$(cd "$d" 2>/dev/null && pwd -P)" || return 1
+  case "$d/" in "$real"/*) return 0 ;; esac
+  return 1
+}
+
+# store_ok <repo> : the quarantine folder and manifest are not symlinks
+store_ok() {
+  if [ -L "$1/$STORE_NAME" ] || [ -L "$1/$STORE_NAME/MANIFEST.tsv" ]; then
+    warn "$1/$STORE_NAME or its MANIFEST.tsv is a symlink; refusing to use it"
+    return 1
+  fi
+  if exists "$1/$STORE_NAME" && [ ! -d "$1/$STORE_NAME" ]; then
+    warn "$1/$STORE_NAME is not a folder; refusing to use it"
+    return 1
+  fi
 }
 
 # free_path <abs-path> : the path itself if unused, else <path>.2, <path>.3, ...
@@ -83,7 +118,12 @@ free_path() {
 
 # move_op <repo> <from-rel> <to-rel> : mv and append to the manifest
 move_op() {
-  local repo="$1" from="$2" to="$3"
+  local repo="$1" from="$2" to="$3" real
+  if ! safe_rel "$from" || ! safe_rel "$to"; then warn "unsafe path, left in place: $from"; return 1; fi
+  real="$(cd "$repo" && pwd -P)"
+  if ! in_repo "$real" "$repo/$from" || ! in_repo "$real" "$repo/$to"; then
+    warn "path leaves the repo through a symlink, left in place: $from"; return 1
+  fi
   mkdir -p "$(dirname "$repo/$to")" || return 1
   if exists "$repo/$to"; then warn "$to already exists; left $from in place"; return 1; fi
   mv "$repo/$from" "$repo/$to" || return 1
@@ -138,6 +178,7 @@ print_link() {
 
 quarantine_one() {
   local repo="$1" store="$1/$STORE_NAME" items=() inner=() p q rel dest moved=0 failed=0
+  store_ok "$repo" || return 1
   while IFS= read -r -d '' p; do items+=("$p"); done < <(find_live "$repo")
   if [ "${#items[@]}" -eq 0 ]; then
     echo "$repo: no live agent files"
@@ -147,7 +188,8 @@ quarantine_one() {
   mkdir -p "$store" || return 1
   [ -f "$store/MANIFEST.tsv" ] || printf '# agent-quarantine: one move per line, <from>TAB<to>, relative to the repo. restore replays it bottom-up.\n' >"$store/MANIFEST.tsv"
   # Keep git from listing the quarantine as untracked (local-only exclude file).
-  if [ -d "$repo/.git/info" ] && ! grep -qxF "/$STORE_NAME/" "$repo/.git/info/exclude" 2>/dev/null; then
+  if [ -d "$repo/.git/info" ] && [ ! -L "$repo/.git" ] && [ ! -L "$repo/.git/info" ] \
+     && [ ! -L "$repo/.git/info/exclude" ] && ! grep -qxF "/$STORE_NAME/" "$repo/.git/info/exclude" 2>/dev/null; then
     echo "/$STORE_NAME/" >>"$repo/.git/info/exclude"
   fi
   for p in "${items[@]}"; do
@@ -174,8 +216,10 @@ quarantine_one() {
 
 restore_one() {
   local repo="$1" store="$1/$STORE_NAME" manifest="$1/$STORE_NAME/MANIFEST.tsv"
-  local froms=() tos=() keep=() from to line i restored=0 kept=0
+  local froms=() tos=() keep=() from to line i restored=0 kept=0 real
+  store_ok "$repo" || return 1
   if [ ! -f "$manifest" ]; then echo "$repo: nothing quarantined"; return 0; fi
+  real="$(cd "$repo" && pwd -P)"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in '#'*|'') continue ;; esac
     froms+=("${line%%$'\t'*}"); tos+=("${line#*$'\t'}")
@@ -183,7 +227,13 @@ restore_one() {
   i=$(( ${#froms[@]} - 1 ))
   while [ "$i" -ge 0 ]; do
     from="${froms[$i]}"; to="${tos[$i]}"
-    if ! exists "$repo/$to"; then
+    # The manifest lives in the repo, so a clone can ship a forged one: refuse
+    # any line that could reach outside the repo.
+    if ! safe_rel "$from" || ! safe_rel "$to"; then
+      warn "unsafe manifest line, skipped: $from"; keep[$i]=1; kept=$((kept + 1))
+    elif ! in_repo "$real" "$repo/$from" || ! in_repo "$real" "$repo/$to"; then
+      warn "manifest line leaves the repo through a symlink, skipped: $from"; keep[$i]=1; kept=$((kept + 1))
+    elif ! exists "$repo/$to"; then
       warn "$to is missing; cannot restore $from"; keep[$i]=1; kept=$((kept + 1))
     elif exists "$repo/$from"; then
       warn "$from exists again (did a git pull bring it back?); quarantined copy kept at $to"
@@ -238,6 +288,7 @@ status_one() {
 # from the repo; lines are cut to 240 characters.
 report_one() {
   local repo="$1" store="$1/$STORE_NAME" hits rc=0
+  store_ok "$repo" || return 2
   if [ ! -d "$store" ]; then echo "$repo: nothing quarantined; run: agent-quarantine quarantine '$repo'"; return 0; fi
   ( cd "$store" || exit 2
     section() { printf '\n## %s\n' "$1"; }
@@ -246,15 +297,15 @@ report_one() {
     section "Moved items"
     show "$(grep -v '^#' MANIFEST.tsv 2>/dev/null | awk -F'\t' -v s="$STORE_NAME/" 'index($2, s) == 1 {print "  " $1}')"
     section "Commands in JSON config (hooks, MCP stdio servers)"
-    show "$(grep -rInE '"command"[[:space:]]*:' --include='*.json*' . 2>/dev/null)"
+    show "$(grep -rInE '"command"[[:space:]]*:' --include='*.[jJ][sS][oO][nN]*' . 2>/dev/null)"
     section "URLs in JSON config (remote MCP servers, hook endpoints)"
-    show "$(grep -rInE '"(url|endpoint|serverUrl)"[[:space:]]*:' --include='*.json*' . 2>/dev/null)"
+    show "$(grep -rInE '"(url|endpoint|serverUrl)"[[:space:]]*:' --include='*.[jJ][sS][oO][nN]*' . 2>/dev/null)"
     section "Hooks and tool grants in Markdown frontmatter"
-    show "$(grep -rInE '^(hooks|allowed-tools|allowedTools)[[:space:]]*:' --include='*.md*' . 2>/dev/null)"
+    show "$(grep -rInE '^(hooks|allowed-tools|allowedTools)[[:space:]]*:' --include='*.[mM][dD]*' . 2>/dev/null)"
     section "Shell lines in skills and commands (!\`...\`)"
-    show "$(grep -rInE '!`' --include='*.md*' . 2>/dev/null)"
+    show "$(grep -rInE '!`' --include='*.[mM][dD]*' . 2>/dev/null)"
     section "Suspicious text (review each)"
-    hits="$(grep -rInIE 'curl[^|]*\|[[:space:]]*(ba|z)?sh|wget[^|]*\|[[:space:]]*(ba|z)?sh|base64[[:space:]]+(-d|--decode)|ignore (all )?(previous|prior|above) instructions|do not (tell|inform|mention)[^.]* (the )?user|\.ssh/|\.aws/credentials|id_rsa|/etc/passwd|nc[[:space:]]+-e|bash[[:space:]]+-i[[:space:]]*>|dangerously-?skip-?permissions|bypassPermissions' . 2>/dev/null)"
+    hits="$(grep -rIinE 'curl[^|]*\|[[:space:]]*(ba|z)?sh|wget[^|]*\|[[:space:]]*(ba|z)?sh|base64[[:space:]]+(-d|--decode)|ignore (all )?(previous|prior|above) instructions|do not (tell|inform|mention)[^.]* (the )?user|\.ssh/|\.aws/credentials|id_rsa|/etc/passwd|nc[[:space:]]+-e|bash[[:space:]]+-i[[:space:]]*>|dangerously-?skip-?permissions|bypassPermissions' . 2>/dev/null)"
     show "$hits"
     [ -z "$hits" ] ) || rc=1
   return "$rc"

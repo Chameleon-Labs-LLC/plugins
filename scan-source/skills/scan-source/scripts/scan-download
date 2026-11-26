@@ -183,19 +183,21 @@ elif [ ! -f "$AQ" ]; then
 else
   printf '\n--- agent-quarantine quarantine ---\n' >>"$LOG"
   "$BASH" "$AQ" quarantine "$TARGET" 2>&1 | tee -a "$LOG" | sed 's/^/  /'
-  aq_rc="${PIPESTATUS[0]}"
-  if [ "$aq_rc" = 0 ]; then
-    printf '\n--- agent-quarantine report ---\n' >>"$LOG"
-    "$BASH" "$AQ" report "$TARGET" >>"$LOG" 2>&1; aq_rc=$?
+  q_rc="${PIPESTATUS[0]}"
+  printf '\n--- agent-quarantine report ---\n' >>"$LOG"
+  "$BASH" "$AQ" report "$TARGET" >>"$LOG" 2>&1; aq_rc=$?
+  # Fail closed: if anything could not be moved, agent files may still be live.
+  if [ "$q_rc" != 0 ]; then
+    set_result agent-config FINDINGS
+    printf '  %sagent-config: QUARANTINE FAILED (exit %s) - agent files may still be live; see log%s\n' "$c_bad" "$q_rc" "$c_off"
   else
-    aq_rc=2   # quarantine failed or was refused: no trustworthy report
+    case "$aq_rc" in
+      0) set_result agent-config CLEAN;    printf '  %sagent-config: nothing suspicious (inventory in log)%s\n' "$c_ok" "$c_off" ;;
+      1) set_result agent-config FINDINGS; printf '  %sagent-config: SUSPICIOUS TEXT in agent files (see log)%s\n' "$c_bad" "$c_off" ;;
+      *) set_result agent-config FINDINGS
+         printf '  %sagent-config: report failed (exit %s); see log%s\n' "$c_bad" "$aq_rc" "$c_off" ;;
+    esac
   fi
-  case "$aq_rc" in
-    0) set_result agent-config CLEAN;    printf '  %sagent-config: nothing suspicious (inventory in log)%s\n' "$c_ok" "$c_off" ;;
-    1) set_result agent-config FINDINGS; printf '  %sagent-config: SUSPICIOUS TEXT in agent files (see log)%s\n' "$c_bad" "$c_off" ;;
-    *) set_result agent-config "SKIP: agent-quarantine error (exit $aq_rc)"
-       printf '  %sagent-config: error (exit %s)%s\n' "$c_warn" "$aq_rc" "$c_off" ;;
-  esac
 fi
 
 # =========================================================================
