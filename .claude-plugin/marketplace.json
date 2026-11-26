@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Plugins from Chameleon Labs — skills, agents, and tooling for Claude Code.",
-    "version": "0.5.1"
+    "version": "0.6.0"
   },
   "plugins": [
     {

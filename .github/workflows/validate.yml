@@ -84,6 +84,7 @@ jobs:
         run: |
           /bin/bash --version | head -1
           for f in scan-source/skills/scan-source/scripts/scan-download \
+                   scan-source/skills/scan-source/scripts/agent-quarantine \
                    scan-source/skills/scan-source/scripts/install-security-scanners.sh \
                    yt-transcript/skills/yt-transcript/scripts/run.sh tests/*.sh; do
             /bin/bash -n "$f" || exit 1
@@ -93,12 +94,15 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           shellcheck -S error scan-source/skills/scan-source/scripts/scan-download \
+            scan-source/skills/scan-source/scripts/agent-quarantine \
             scan-source/skills/scan-source/scripts/install-security-scanners.sh \
             yt-transcript/skills/yt-transcript/scripts/run.sh tests/*.sh
       - name: scan-download smoke test
         run: /bin/bash tests/smoke-scan-download.sh
       - name: scan-download smoke test without timeout/gtimeout
         run: /bin/bash tests/smoke-scan-download.sh --no-timeout
+      - name: agent-quarantine smoke test
+        run: /bin/bash tests/smoke-agent-quarantine.sh
 
   cross-platform-python:
     strategy:

@@ -32,6 +32,16 @@ def _hermetic(monkeypatch, tmp_path):
     monkeypatch.delenv("PR_TOOL_CODE_ROOT", raising=False)
     monkeypatch.setattr(pt, "OWNERS", ["octo-user", "Octo-Org"])
     monkeypatch.setattr(pt, "_CACHE", {"me": "octo-user"})
+    # The fixtures are dated NOW; the tool reads the wall clock. Without this,
+    # every fixture PR turned STALE once NOW was STALE_DAYS in the past.
+    monkeypatch.setattr(pt, "datetime", _FrozenDatetime)
+
+
+class _FrozenDatetime(datetime):
+    """pr_tool's clock pinned to NOW."""
+    @classmethod
+    def now(cls, tz=None):
+        return NOW if tz is None else NOW.astimezone(tz)
 
 
 def test_owners_come_from_flag_then_env_then_config_then_sign_in(monkeypatch, tmp_path):

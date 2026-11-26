@@ -1,0 +1,468 @@
+#!/usr/bin/env bash
+#
+# agent-quarantine  -  move AI-agent instructions and config out of a third-party
+#                      source tree so no agent CLI loads them, and put them back
+#
+# Usage:
+#   agent-quarantine quarantine [--each] PATH   move agent files into PATH/.agent-quarantine/
+#   agent-quarantine restore    [--each] PATH   put them back where they were
+#   agent-quarantine status     [--each] PATH   show what is quarantined and what is still live
+#   agent-quarantine report     PATH            list hook commands, MCP servers, skill shell
+#                                               lines and suspicious text in the quarantine
+#   agent-quarantine open       PATH            open PATH/.agent-quarantine in Explorer (WSL),
+#                                               Finder (macOS) or xdg-open (Linux)
+#
+#   --each   PATH is a folder of repos: act on every direct subfolder. Hidden
+#            subfolders and symlinked subfolders are skipped.
+#
+# Why: Claude Code loads a subfolder's CLAUDE.md, AGENTS.md, .claude/rules and
+# .claude/skills the first time it reads any file there, and the other agent
+# CLIs (Codex, Gemini/agy, Copilot, Cursor, ...) find their files by the same
+# kind of fixed names. Each match is moved under .agent-quarantine/ with a
+# ".quarantined" suffix (and every agent name inside a moved folder is suffixed
+# too), so nothing recognises it while the scanners still read every file.
+#
+# Every move is one line of a journal kept OUTSIDE the repo, in
+# ${AGENT_QUARANTINE_STATE:-${XDG_STATE_HOME:-~/.local/state}/agent-quarantine}/,
+# so a repo cannot ship a forged one. restore replays it bottom-up, saves its
+# progress after every move, never overwrites a file that exists again (for
+# example after a `git pull`), and never moves through a symlinked folder.
+#
+# Exit codes: 0 ok; 1 needs attention (something not moved or not restored,
+# live agent files in status, suspicious text in report); 2 usage error or a
+# failed read.
+#
+set -uo pipefail
+
+STORE_NAME=.agent-quarantine
+SUFFIX=.quarantined
+STATE_DIR="${AGENT_QUARANTINE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-quarantine}"
+
+# Matched by exact name (case-insensitive) at any depth, files or folders.
+AGENT_NAMES=(
+  CLAUDE.md CLAUDE.local.md AGENTS.md AGENTS.override.md GEMINI.md
+  .mcp.json .cursorrules .windsurfrules .clinerules .roomodes .goosehints
+  .aider.conf.yml opencode.json opencode.jsonc
+  .claude .codex .gemini .cursor .agents .agent .windsurf .roo .kiro
+  .continue .amazonq .opencode .junie .pi
+)
+# Matched by path suffix: Copilot and VS Code keep agent files beside other config.
+AGENT_PATHS=(
+  .github/copilot-instructions.md .github/instructions .github/prompts
+  .github/chatmodes .github/agents .vscode/mcp.json
+)
+
+NAME_EXPR=()
+for n in "${AGENT_NAMES[@]}"; do NAME_EXPR+=(-o -iname "$n"); done
+for p in "${AGENT_PATHS[@]}"; do NAME_EXPR+=(-o -ipath "*/$p"); done
+NAME_EXPR=("${NAME_EXPR[@]:1}")   # drop the leading -o
+
+die()  { echo "agent-quarantine: $*" >&2; exit 2; }
+warn() { echo "  WARNING: $*" >&2; }
+usage() { sed -n '2,34p' "$0"; }
+
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "agent-quarantine: native Windows shell detected; run it in WSL." >&2
+    echo "  Run: wsl.exe -e bash -lc 'bash /mnt/<drive>/<path-to>/agent-quarantine quarantine /mnt/<drive>/<target>'" >&2
+    exit 2 ;;
+esac
+
+exists() { [ -e "$1" ] || [ -L "$1" ]; }
+glob_escape() { printf '%s' "$1" | sed 's/[][*?\\]/\\&/g'; }
+
+# collect <find arguments...> : run find, fill FOUND with its NUL-separated
+# output, and return find's own status, so an unreadable subtree is an error
+# rather than "nothing found".
+FOUND=()
+collect() {
+  local tmp rc p
+  FOUND=()
+  tmp="$(mktemp "${TMPDIR:-/tmp}/agent-quarantine.XXXXXX")" || return 2
+  find "$@" >"$tmp"; rc=$?
+  while IFS= read -r -d '' p; do FOUND+=("$p"); done <"$tmp"
+  rm -f "$tmp"
+  return "$rc"
+}
+
+# collect_live <repo> : agent files/folders still in place. Skips only the repo's
+# own top-level .git; everything else is searched, the quarantine included (a
+# stored item never keeps a bare agent name, so a match there was planted),
+# because a name-based skip anywhere is a hiding place.
+collect_live() {
+  collect "$1" -mindepth 1 -path "$(glob_escape "$1")/.git" -prune \
+    -o \( "${NAME_EXPR[@]}" \) -print0 -prune
+}
+
+# safe_rel <rel> : a relative path with no empty, "." or ".." parts, no tab or
+# newline, and no .git component.
+safe_rel() {
+  case "$1" in ''|/*|*$'\t'*|*$'\n'*) return 1 ;; esac
+  case "/$1/" in */../*|*/./*|*//*) return 1 ;; esac
+  case "$(printf '%s' "/$1/" | tr '[:upper:]' '[:lower:]')" in */.git/*) return 1 ;; esac
+  return 0
+}
+
+# no_link_parents <repo> <rel> : no folder between the repo and rel is a
+# symlink, so a move cannot be redirected (into .git, or out of the repo).
+no_link_parents() {
+  local d
+  d="$(dirname "$2")"
+  while [ "$d" != . ] && [ "$d" != / ]; do
+    [ -L "$1/$d" ] && return 1
+    d="$(dirname "$d")"
+  done
+  return 0
+}
+
+# store_ok <repo> : the quarantine folder is a real folder, not a symlink
+store_ok() {
+  if [ -L "$1/$STORE_NAME" ]; then warn "$1/$STORE_NAME is a symlink; refusing to use it"; return 1; fi
+  if exists "$1/$STORE_NAME" && [ ! -d "$1/$STORE_NAME" ]; then
+    warn "$1/$STORE_NAME is not a folder; refusing to use it"; return 1
+  fi
+}
+
+# journal <repo> : this repo's journal file, outside the repo
+journal() {
+  local key name
+  key="$(printf '%s' "$1" | cksum | awk '{print $1 "-" $2}')"
+  name="$(printf '%s' "${1##*/}" | tr -c 'A-Za-z0-9._-' '_')"
+  name="${name:0:64}"   # stay far below the 255-byte file name limit
+  printf '%s/%s-%s.tsv' "$STATE_DIR" "$name" "$key"
+}
+
+# target_line <repo> : journal line 2, naming the repo (hex, so any byte is safe)
+target_line() { printf '# target: %s' "$(printf '%s' "$1" | od -An -tx1 | tr -d ' \n')"; }
+
+# journal_ok <repo> <journal> : a missing journal is fine; an existing one must
+# name this repo on line 2. Two repos must never share a journal, even if
+# their file names collide.
+journal_ok() {
+  [ -f "$2" ] || return 0
+  if [ "$(sed -n 2p "$2")" != "$(target_line "$1")" ]; then
+    warn "journal $2 belongs to another folder; refusing to use it"
+    return 1
+  fi
+}
+
+# free_path <abs-path> : the path itself if unused, else <path>.2, <path>.3, ...
+free_path() {
+  local p="$1" n=2
+  if ! exists "$p"; then printf '%s' "$p"; return; fi
+  while exists "$p.$n"; do n=$((n + 1)); done
+  printf '%s' "$p.$n"
+}
+
+# move_op <repo> <journal> <from-rel> <to-rel> : mv and record it. If the record
+# cannot be written the move is undone, so nothing is ever moved unrecorded.
+move_op() {
+  local repo="$1" j="$2" from="$3" to="$4"
+  if ! safe_rel "$from" || ! safe_rel "$to"; then warn "unsafe path, left in place: $from"; return 1; fi
+  if ! no_link_parents "$repo" "$from" || ! no_link_parents "$repo" "$to"; then
+    warn "path runs through a symlinked folder, left in place: $from"; return 1
+  fi
+  mkdir -p "$(dirname "$repo/$to")" || return 1
+  if exists "$repo/$to"; then warn "$to already exists; left $from in place"; return 1; fi
+  mv "$repo/$from" "$repo/$to" || return 1
+  if ! printf '%s\t%s\n' "$from" "$to" >>"$j"; then
+    if mv "$repo/$to" "$repo/$from"; then
+      warn "could not write the journal $j; moved $from back"
+    else
+      warn "could not write the journal $j, and could not move it back: $repo/$from is at $repo/$to"
+    fi
+    return 1
+  fi
+}
+
+is_wsl() { [ -n "${WSL_DISTRO_NAME:-}" ] || grep -qi microsoft /proc/version 2>/dev/null; }
+
+uri_escape() { printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/ /%20/g' -e 's/#/%23/g' -e 's/?/%3F/g'; }
+
+# file_uri <path> : file:// URI for a POSIX path, D:\x path or \\server\share path
+file_uri() {
+  local p="$1"
+  case "$p" in
+    '\\'*)          p="$(printf '%s' "${p#??}" | tr '\\' '/')"; printf 'file://%s' "$(uri_escape "$p")" ;;
+    [A-Za-z]:'\'*)  p="$(printf '%s' "$p" | tr '\\' '/')";      printf 'file:///%s' "$(uri_escape "$p")" ;;
+    *)              printf 'file://%s' "$(uri_escape "$p")" ;;
+  esac
+}
+
+# shown_path <abs-path> : the Windows form under WSL, else the path itself
+shown_path() {
+  if is_wsl && command -v wslpath >/dev/null 2>&1; then
+    wslpath -w "$1" 2>/dev/null && return
+  fi
+  printf '%s' "$1"
+}
+
+# print_link <store-dir> : where the files are, a clickable link, and the open command
+print_link() {
+  local dir="$1" shown uri
+  shown="$(shown_path "$dir")"
+  uri="$(file_uri "$shown")"
+  echo "  Quarantined agent files: $shown"
+  if [ -t 1 ]; then
+    printf '  Link (Ctrl+click): \033]8;;%s\033\\%s\033]8;;\033\\\n' "$uri" "$uri"
+  else
+    echo "  Link: $uri"
+  fi
+  case "$shown" in *"'"*) return ;; esac   # no safe one-line quoting for both shells
+  if is_wsl; then
+    echo "  Open in Explorer (same command in WSL and PowerShell):"
+    echo "    explorer.exe '$shown'"
+  elif [ "$(uname -s)" = Darwin ]; then
+    echo "  Open in Finder:  open '$dir'"
+  else
+    echo "  Open:  xdg-open '$dir'"
+  fi
+}
+
+# rows <journal> : the journal's move records (every line after the header)
+rows() { [ -f "$1" ] && tail -n +3 "$1"; }
+
+# ---- commands --------------------------------------------------------------
+
+quarantine_one() {
+  local repo="$1" store="$1/$STORE_NAME" j items=() inner=() p q rel dest moved=0 failed=0
+  store_ok "$repo" || return 1
+  j="$(journal "$repo")"
+  journal_ok "$repo" "$j" || return 1
+  if [ -d "$store" ] && [ ! -f "$j" ]; then
+    warn "$store exists but has no journal (shipped with the repo, or the repo moved); it is searched like any other folder"
+  fi
+  if ! collect_live "$repo"; then
+    warn "could not read all of $repo; agent files in unreadable folders may still be live"
+    failed=1
+  fi
+  items=(${FOUND[@]+"${FOUND[@]}"})
+  if [ "${#items[@]}" -eq 0 ]; then
+    echo "$repo: no live agent files"
+    [ -d "$store" ] && print_link "$store"
+    return "$failed"
+  fi
+  mkdir -p "$STATE_DIR" && chmod 700 "$STATE_DIR" 2>/dev/null
+  if [ ! -f "$j" ]; then
+    { printf '# agent-quarantine journal v1: <from>TAB<to>, relative to the repo, one move per line\n'
+      target_line "$repo"; printf '\n'; } >"$j" \
+      || { warn "cannot write the journal $j; nothing moved"; return 1; }
+  fi
+  mkdir -p "$store" || return 1
+  # Deliberately NOT added to .git/info/exclude: Semgrep and other scanners use
+  # git's ignore rules to pick files, and would then skip the quarantined hooks.
+  for p in "${items[@]}"; do
+    rel="${p#"$repo"/}"
+    # Suffix every agent name inside a moved folder first, deepest first, so
+    # nothing under .agent-quarantine keeps a name an agent would load.
+    if [ -d "$p" ] && [ ! -L "$p" ]; then
+      if ! collect "$p" -mindepth 1 -depth \( "${NAME_EXPR[@]}" \) -print0; then
+        warn "could not read all of $rel; left it in place"; failed=1; continue
+      fi
+      inner=(${FOUND[@]+"${FOUND[@]}"})
+      for q in ${inner[@]+"${inner[@]}"}; do
+        dest="$(free_path "$q$SUFFIX")"
+        move_op "$repo" "$j" "${q#"$repo"/}" "${dest#"$repo"/}" || failed=1
+      done
+    fi
+    dest="$(free_path "$store/$rel$SUFFIX")"
+    if move_op "$repo" "$j" "$rel" "${dest#"$repo"/}"; then moved=$((moved + 1)); else failed=1; fi
+  done
+  echo "$repo: quarantined $moved agent file(s)/folder(s)"
+  print_link "$store"
+  return "$failed"
+}
+
+restore_one() {
+  local repo="$1" store="$1/$STORE_NAME" j froms=() tos=() done_=() blocked=() from to line i b
+  local restored=0 kept=0 skip tmp recs
+  store_ok "$repo" || return 1
+  j="$(journal "$repo")"
+  journal_ok "$repo" "$j" || return 2
+  if [ ! -f "$j" ]; then
+    echo "$repo: nothing quarantined (no journal at $j)"
+    [ -d "$store" ] && warn "$store exists without a journal; restore its contents by hand if they are yours"
+    return 0
+  fi
+  # Read the journal through a checked step: an unreadable journal must stop
+  # restore before anything moves or the journal is deleted.
+  recs="$(mktemp "${TMPDIR:-/tmp}/agent-quarantine.XXXXXX")" || return 2
+  if [ ! -r "$j" ] || ! tail -n +3 "$j" >"$recs"; then
+    rm -f "$recs"; warn "cannot read the journal $j; nothing restored"; return 2
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    froms+=("${line%%$'\t'*}")
+    case "$line" in *$'\t'*) tos+=("${line#*$'\t'}") ;; *) tos+=("") ;; esac
+  done <"$recs"
+  rm -f "$recs"
+
+  # write_journal : the header plus every row not yet restored
+  write_journal() {
+    local k=0
+    tmp="$(mktemp "$STATE_DIR/.journal.XXXXXX")" || return 1
+    { head -n 2 "$j"
+      while [ "$k" -lt "${#froms[@]}" ]; do
+        [ -z "${done_[$k]:-}" ] && printf '%s\t%s\n' "${froms[$k]}" "${tos[$k]}"
+        k=$((k + 1))
+      done; } >"$tmp" && mv "$tmp" "$j"
+  }
+
+  i=$(( ${#froms[@]} - 1 ))
+  while [ "$i" -ge 0 ]; do
+    from="${froms[$i]}"; to="${tos[$i]}"; skip=""
+    # A folder kept in quarantine keeps the renames made inside it.
+    for b in ${blocked[@]+"${blocked[@]}"}; do
+      case "$from" in "$b"/*) skip=1 ;; esac
+    done
+    if [ -n "$skip" ]; then
+      kept=$((kept + 1))
+    elif ! safe_rel "$from" || ! safe_rel "$to"; then
+      warn "unsafe journal line, skipped: $from"; kept=$((kept + 1)); blocked+=("$from")
+    elif ! no_link_parents "$repo" "$from" || ! no_link_parents "$repo" "$to"; then
+      warn "a folder on the path of $from is now a symlink; kept in quarantine at $to"
+      kept=$((kept + 1)); blocked+=("$from")
+    elif ! exists "$repo/$to" && exists "$repo/$from"; then
+      # The quarantined copy was deleted and the original is back: the user
+      # resolved a conflict by keeping the original. Drop the record.
+      done_[$i]=1
+      write_journal || warn "could not save restore progress to $j"
+    elif ! exists "$repo/$to"; then
+      warn "$to is missing; cannot restore $from"; kept=$((kept + 1)); blocked+=("$from")
+    elif exists "$repo/$from"; then
+      warn "$from exists again (did a git pull bring it back?); quarantined copy kept at $to"
+      kept=$((kept + 1)); blocked+=("$from")
+    elif mkdir -p "$(dirname "$repo/$from")" && mv "$repo/$to" "$repo/$from"; then
+      restored=$((restored + 1)); done_[$i]=1
+      write_journal || warn "could not save restore progress to $j"
+    else
+      warn "could not move $to back to $from"; kept=$((kept + 1)); blocked+=("$from")
+    fi
+    i=$((i - 1))
+  done
+  if [ "$kept" -gt 0 ]; then
+    echo "$repo: restored $restored, kept $kept in quarantine"
+    echo "  Compare each kept copy with the file now in its place, keep the one you want,"
+    echo "  delete the other, and run restore again."
+    print_link "$store"
+    return 1
+  fi
+  rm -f "$j"
+  [ -d "$store" ] && find "$store" -depth -type d -empty -exec rmdir {} \; 2>/dev/null
+  if [ -d "$store" ]; then
+    echo "$repo: restored $restored; $STORE_NAME still holds files this tool did not put there"
+    print_link "$store"
+    return 1
+  fi
+  echo "$repo: restored $restored agent file(s)/folder(s)"
+  return 0
+}
+
+status_one() {
+  local repo="$1" store="$1/$STORE_NAME" j p n=0 rc=0
+  store_ok "$repo" || return 1
+  j="$(journal "$repo")"
+  journal_ok "$repo" "$j" || return 2
+  if ! collect_live "$repo"; then warn "could not read all of $repo"; rc=1; fi
+  [ -f "$j" ] && n="$(rows "$j" | grep -c $'\t'"$STORE_NAME/" || true)"
+  if [ "${#FOUND[@]}" -gt 0 ]; then
+    echo "$repo: ${#FOUND[@]} LIVE agent file(s)/folder(s), $n quarantined"
+    for p in "${FOUND[@]}"; do echo "    live: ${p#"$repo"/}"; done
+    rc=1
+  else
+    echo "$repo: no live agent files, $n quarantined"
+  fi
+  [ "$n" -gt 0 ] && print_link "$store"
+  return "$rc"
+}
+
+# report <repo> : what the quarantined config would do. Output is untrusted text
+# from the repo; lines are cut to 240 characters. Exit 0 nothing suspicious,
+# 1 suspicious text, 2 a file could not be read (never reported as clean).
+report_one() {
+  local repo="$1" store="$1/$STORE_NAME" j
+  store_ok "$repo" || return 2
+  j="$(journal "$repo")"
+  journal_ok "$repo" "$j" || return 2
+  if [ ! -d "$store" ]; then echo "$repo: nothing quarantined; run: agent-quarantine quarantine '$repo'"; return 0; fi
+  ( cd "$store" || exit 2
+    err=0; out=""
+    section() { printf '\n## %s\n' "$1"; }
+    show() { if [ -n "$1" ]; then printf '%s\n' "$1" | cut -c1-240; else echo "  (none)"; fi; }
+    g() { out="$(grep "$@" . 2>/dev/null)"; [ $? -gt 1 ] && err=1; }   # grep: 0 match, 1 none, 2 error
+    echo "# Agent config quarantined in $repo"
+    section "Moved items"
+    show "$(rows "$j" 2>/dev/null | awk -F'\t' -v s="$STORE_NAME/" 'index($2, s) == 1 {print "  " $1}')"
+    section "Commands in JSON config (hooks, MCP stdio servers)"
+    g -rInE '"command"[[:space:]]*:' --include='*.[jJ][sS][oO][nN]*'; show "$out"
+    section "URLs in JSON config (remote MCP servers, hook endpoints)"
+    g -rInE '"(url|endpoint|serverUrl)"[[:space:]]*:' --include='*.[jJ][sS][oO][nN]*'; show "$out"
+    section "Hooks and tool grants in Markdown frontmatter"
+    g -rInE '^(hooks|allowed-tools|allowedTools)[[:space:]]*:' --include='*.[mM][dD]*'; show "$out"
+    section "Shell lines in skills and commands (!\`...\`)"
+    g -rInE '!`' --include='*.[mM][dD]*'; show "$out"
+    section "Suspicious text (review each)"
+    g -rIinE 'curl[^|]*\|[[:space:]]*(ba|z)?sh|wget[^|]*\|[[:space:]]*(ba|z)?sh|base64[[:space:]]+(-d|--decode)|ignore (all )?(previous|prior|above) instructions|do not (tell|inform|mention)[^.]* (the )?user|\.ssh/|\.aws/credentials|id_rsa|/etc/passwd|nc[[:space:]]+-e|bash[[:space:]]+-i[[:space:]]*>|dangerously-?skip-?permissions|bypassPermissions'
+    hits="$out"; show "$hits"
+    if [ "$err" = 1 ]; then echo; echo "ERROR: some quarantined files could not be read; this report is incomplete"; exit 2; fi
+    [ -z "$hits" ] )
+}
+
+open_one() {
+  local store="$1/$STORE_NAME" shown
+  [ -d "$store" ] || die "$1 has no $STORE_NAME folder"
+  shown="$(shown_path "$store")"
+  if is_wsl; then
+    explorer.exe "$shown" || true   # explorer.exe exits 1 even when it opens the window
+  elif [ "$(uname -s)" = Darwin ]; then
+    open "$store"
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$store"
+  else
+    die "no file manager opener found; the folder is $store"
+  fi
+  print_link "$store"
+}
+
+# ---- args ------------------------------------------------------------------
+CMD="${1:-}"; [ $# -gt 0 ] && shift
+EACH=0; TARGET=""
+for a in ${1+"$@"}; do
+  case "$a" in
+    --each) EACH=1 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "unknown option $a" ;;
+    *) [ -z "$TARGET" ] || die "one PATH only"; TARGET="$a" ;;
+  esac
+done
+case "$CMD" in
+  quarantine|restore|status|report|open) ;;
+  -h|--help|help) usage; exit 0 ;;
+  *) usage >&2; exit 2 ;;
+esac
+[ -n "$TARGET" ] || die "PATH is required"
+[ -d "$TARGET" ] || die "'$TARGET' is not a directory"
+# Physical path (find does not descend a symlinked root). The x sentinel keeps
+# a trailing newline in a folder name from being stripped.
+TARGET="$(cd "$TARGET" && pwd -P && echo x)" || die "cannot enter '$TARGET'"
+TARGET="${TARGET%x}"; TARGET="${TARGET%$'\n'}"
+[ "$TARGET" = / ] || [ "$TARGET" = "$(cd "$HOME" && pwd -P)" ] && die "refusing to act on $TARGET; name a repo or use --each on its parent"
+
+if [ "$EACH" = 1 ]; then
+  case "$CMD" in report|open) die "--each works with quarantine, restore and status" ;; esac
+  rc=0
+  for d in "$TARGET"/*/; do
+    [ -d "$d" ] || continue
+    d="${d%/}"
+    [ -L "$d" ] && continue
+    "${CMD}_one" "$d" || rc=1
+  done
+  exit "$rc"
+fi
+
+# A folder of repos is almost certainly a mistake without --each.
+if [ "$CMD" = quarantine ] && ! exists "$TARGET/.git"; then
+  for d in "$TARGET"/*/; do
+    if exists "${d}.git"; then die "$TARGET holds git repos; use --each to quarantine each of them"; fi
+  done
+fi
+"${CMD}_one" "$TARGET"
