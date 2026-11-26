@@ -174,6 +174,17 @@ if [ "$(id -u)" != 0 ]; then
   check "unreadable journal: copy still quarantined"   test -f "$U2/.agent-quarantine/CLAUDE.md.quarantined"
 fi
 
+# A journal that names another folder is refused, never used (CodeRabbit).
+X="$W/other"; mkdir -p "$X"; echo x >"$X/CLAUDE.md"
+"$BASH" "$AQ" quarantine "$X" >/dev/null 2>&1
+JX="$(ls "$W/state"/other-*.tsv)"
+sed -i.bak '2s/.*/# target: 2f6e6f7065/' "$JX" && rm -f "$JX.bak"
+"$BASH" "$AQ" restore "$X" >/dev/null 2>&1; rc=$?
+check   "foreign journal: restore refuses (exit 2)"    test "$rc" = 2
+check   "foreign journal: copy still quarantined"      test -f "$X/.agent-quarantine/CLAUDE.md.quarantined"
+"$BASH" "$AQ" quarantine "$X" >/dev/null 2>&1; rc=$?
+check   "foreign journal: quarantine refuses"          test "$rc" = 1
+
 # A path that starts with # is a move, not a comment (CodeRabbit).
 P="$W/hash"; mkdir -p "$P/#docs"; echo h >"$P/#docs/CLAUDE.md"
 "$BASH" "$AQ" quarantine "$P" >/dev/null 2>&1

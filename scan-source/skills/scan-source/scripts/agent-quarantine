@@ -128,8 +128,22 @@ journal() {
   local key name
   key="$(printf '%s' "$1" | cksum | awk '{print $1 "-" $2}')"
   name="$(printf '%s' "${1##*/}" | tr -c 'A-Za-z0-9._-' '_')"
-  name="${name:0:64}"   # the checksum keeps it unique; stay far below 255 bytes
+  name="${name:0:64}"   # stay far below the 255-byte file name limit
   printf '%s/%s-%s.tsv' "$STATE_DIR" "$name" "$key"
+}
+
+# target_line <repo> : journal line 2, naming the repo (hex, so any byte is safe)
+target_line() { printf '# target: %s' "$(printf '%s' "$1" | od -An -tx1 | tr -d ' \n')"; }
+
+# journal_ok <repo> <journal> : a missing journal is fine; an existing one must
+# name this repo on line 2. Two repos must never share a journal, even if
+# their file names collide.
+journal_ok() {
+  [ -f "$2" ] || return 0
+  if [ "$(sed -n 2p "$2")" != "$(target_line "$1")" ]; then
+    warn "journal $2 belongs to another folder; refusing to use it"
+    return 1
+  fi
 }
 
 # free_path <abs-path> : the path itself if unused, else <path>.2, <path>.3, ...
@@ -206,7 +220,7 @@ print_link() {
 }
 
 # rows <journal> : the journal's move records (every line after the header)
-rows() { [ -f "$1" ] && tail -n +2 "$1"; }
+rows() { [ -f "$1" ] && tail -n +3 "$1"; }
 
 # ---- commands --------------------------------------------------------------
 
@@ -214,6 +228,7 @@ quarantine_one() {
   local repo="$1" store="$1/$STORE_NAME" j items=() inner=() p q rel dest moved=0 failed=0
   store_ok "$repo" || return 1
   j="$(journal "$repo")"
+  journal_ok "$repo" "$j" || return 1
   if [ -d "$store" ] && [ ! -f "$j" ]; then
     warn "$store exists but has no journal (shipped with the repo, or the repo moved); it is searched like any other folder"
   fi
@@ -229,7 +244,8 @@ quarantine_one() {
   fi
   mkdir -p "$STATE_DIR" && chmod 700 "$STATE_DIR" 2>/dev/null
   if [ ! -f "$j" ]; then
-    printf '# agent-quarantine journal v1: <from>TAB<to>, relative to the repo, one move per line\n' >"$j" \
+    { printf '# agent-quarantine journal v1: <from>TAB<to>, relative to the repo, one move per line\n'
+      target_line "$repo"; printf '\n'; } >"$j" \
       || { warn "cannot write the journal $j; nothing moved"; return 1; }
   fi
   mkdir -p "$store" || return 1
@@ -262,6 +278,7 @@ restore_one() {
   local restored=0 kept=0 skip tmp recs
   store_ok "$repo" || return 1
   j="$(journal "$repo")"
+  journal_ok "$repo" "$j" || return 2
   if [ ! -f "$j" ]; then
     echo "$repo: nothing quarantined (no journal at $j)"
     [ -d "$store" ] && warn "$store exists without a journal; restore its contents by hand if they are yours"
@@ -270,7 +287,7 @@ restore_one() {
   # Read the journal through a checked step: an unreadable journal must stop
   # restore before anything moves or the journal is deleted.
   recs="$(mktemp "${TMPDIR:-/tmp}/agent-quarantine.XXXXXX")" || return 2
-  if [ ! -r "$j" ] || ! tail -n +2 "$j" >"$recs"; then
+  if [ ! -r "$j" ] || ! tail -n +3 "$j" >"$recs"; then
     rm -f "$recs"; warn "cannot read the journal $j; nothing restored"; return 2
   fi
   while IFS= read -r line || [ -n "$line" ]; do
@@ -283,7 +300,7 @@ restore_one() {
   write_journal() {
     local k=0
     tmp="$(mktemp "$STATE_DIR/.journal.XXXXXX")" || return 1
-    { head -n 1 "$j"
+    { head -n 2 "$j"
       while [ "$k" -lt "${#froms[@]}" ]; do
         [ -z "${done_[$k]:-}" ] && printf '%s\t%s\n' "${froms[$k]}" "${tos[$k]}"
         k=$((k + 1))
@@ -344,6 +361,7 @@ status_one() {
   local repo="$1" store="$1/$STORE_NAME" j p n=0 rc=0
   store_ok "$repo" || return 1
   j="$(journal "$repo")"
+  journal_ok "$repo" "$j" || return 2
   if ! collect_live "$repo"; then warn "could not read all of $repo"; rc=1; fi
   [ -f "$j" ] && n="$(rows "$j" | grep -c $'\t'"$STORE_NAME/" || true)"
   if [ "${#FOUND[@]}" -gt 0 ]; then
@@ -364,6 +382,7 @@ report_one() {
   local repo="$1" store="$1/$STORE_NAME" j
   store_ok "$repo" || return 2
   j="$(journal "$repo")"
+  journal_ok "$repo" "$j" || return 2
   if [ ! -d "$store" ]; then echo "$repo: nothing quarantined; run: agent-quarantine quarantine '$repo'"; return 0; fi
   ( cd "$store" || exit 2
     err=0; out=""

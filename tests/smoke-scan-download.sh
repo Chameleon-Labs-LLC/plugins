@@ -35,7 +35,7 @@ printf 'benign-thing\n' >"$W/allow.txt"
 if [ "$MODE" = --no-timeout ]; then
   U="$W/util"; mkdir -p "$U"
   for c in date mkdir find grep head awk tee sed sleep mktemp rm pkill uname cat sh env \
-           mv rmdir dirname cut tr cksum tail chmod basename; do
+           mv rmdir dirname cut tr cksum tail chmod basename od; do
     p="$(command -v "$c")" && ln -s "$p" "$U/$c"
   done
   P="$FB:$U"
