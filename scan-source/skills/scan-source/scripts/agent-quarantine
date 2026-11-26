@@ -1,0 +1,318 @@
+#!/usr/bin/env bash
+#
+# agent-quarantine  -  move AI-agent instructions and config out of a third-party
+#                      source tree so no agent CLI loads them, and put them back
+#
+# Usage:
+#   agent-quarantine quarantine [--each] PATH   move agent files into PATH/.agent-quarantine/
+#   agent-quarantine restore    [--each] PATH   put them back where they were
+#   agent-quarantine status     [--each] PATH   show what is quarantined and what is still live
+#   agent-quarantine report     PATH            list hook commands, MCP servers, skill shell
+#                                               lines and suspicious text in the quarantine
+#   agent-quarantine open       PATH            open PATH/.agent-quarantine in Explorer (WSL),
+#                                               Finder (macOS) or xdg-open (Linux)
+#
+#   --each   PATH is a folder of repos: act on every direct subfolder.
+#
+# Why: Claude Code loads a subfolder's CLAUDE.md, AGENTS.md, .claude/rules and
+# .claude/skills the first time it reads any file there, and the other agent
+# CLIs (Codex, Gemini/agy, Copilot, Cursor, ...) find their files by the same
+# kind of fixed names. Each match is moved under .agent-quarantine/ with a
+# ".quarantined" suffix (and every agent name inside a moved folder is suffixed
+# too), so nothing recognises it while the scanners still read every file.
+#
+# Every move is one line of .agent-quarantine/MANIFEST.tsv; restore replays the
+# manifest bottom-up and never overwrites a file that exists again (for example
+# after a `git pull`). Restore before pulling: git refuses to update tracked
+# files that are missing from the working tree.
+#
+# Exit codes: 0 ok; 1 needs attention (restore conflict, live agent files in
+# status, suspicious text in report); 2 usage error.
+#
+set -uo pipefail
+
+STORE_NAME=.agent-quarantine
+SUFFIX=.quarantined
+
+# Matched by exact name (case-insensitive) at any depth, files or folders.
+AGENT_NAMES=(
+  CLAUDE.md CLAUDE.local.md AGENTS.md AGENTS.override.md GEMINI.md
+  .mcp.json .cursorrules .windsurfrules .clinerules .roomodes .goosehints
+  .aider.conf.yml opencode.json opencode.jsonc
+  .claude .codex .gemini .cursor .agents .agent .windsurf .roo .kiro
+  .continue .amazonq .opencode .junie .pi
+)
+# Matched by path suffix: Copilot and VS Code keep agent files beside other config.
+AGENT_PATHS=(
+  .github/copilot-instructions.md .github/instructions .github/prompts
+  .github/chatmodes .github/agents .vscode/mcp.json
+)
+
+NAME_EXPR=()
+for n in "${AGENT_NAMES[@]}"; do NAME_EXPR+=(-o -iname "$n"); done
+for p in "${AGENT_PATHS[@]}"; do NAME_EXPR+=(-o -ipath "*/$p"); done
+NAME_EXPR=("${NAME_EXPR[@]:1}")   # drop the leading -o
+
+die()  { echo "agent-quarantine: $*" >&2; exit 2; }
+warn() { echo "  WARNING: $*" >&2; }
+usage() { sed -n '2,32p' "$0"; }
+
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "agent-quarantine: native Windows shell detected; run it in WSL." >&2
+    echo "  Run: wsl.exe -e bash -lc 'bash /mnt/<drive>/<path-to>/agent-quarantine quarantine /mnt/<drive>/<target>'" >&2
+    exit 2 ;;
+esac
+
+exists() { [ -e "$1" ] || [ -L "$1" ]; }
+
+# find_live <repo> : NUL-separated agent files/folders still in place. Does not
+# descend into a match, .git, the quarantine itself, or scan reports.
+find_live() {
+  find "$1" -mindepth 1 \( -name .git -o -name "$STORE_NAME" -o -name .scan-reports \) -prune \
+    -o \( "${NAME_EXPR[@]}" \) -print0 -prune
+}
+
+# free_path <abs-path> : the path itself if unused, else <path>.2, <path>.3, ...
+free_path() {
+  local p="$1" n=2
+  if ! exists "$p"; then printf '%s' "$p"; return; fi
+  while exists "$p.$n"; do n=$((n + 1)); done
+  printf '%s' "$p.$n"
+}
+
+# move_op <repo> <from-rel> <to-rel> : mv and append to the manifest
+move_op() {
+  local repo="$1" from="$2" to="$3"
+  mkdir -p "$(dirname "$repo/$to")" || return 1
+  if exists "$repo/$to"; then warn "$to already exists; left $from in place"; return 1; fi
+  mv "$repo/$from" "$repo/$to" || return 1
+  printf '%s\t%s\n' "$from" "$to" >>"$repo/$STORE_NAME/MANIFEST.tsv"
+}
+
+is_wsl() { [ -n "${WSL_DISTRO_NAME:-}" ] || grep -qi microsoft /proc/version 2>/dev/null; }
+
+uri_escape() { printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/ /%20/g' -e 's/#/%23/g' -e 's/?/%3F/g'; }
+
+# file_uri <path> : file:// URI for a POSIX path, D:\x path or \\server\share path
+file_uri() {
+  local p="$1"
+  case "$p" in
+    '\\'*)          p="$(printf '%s' "${p#??}" | tr '\\' '/')"; printf 'file://%s' "$(uri_escape "$p")" ;;
+    [A-Za-z]:'\'*)  p="$(printf '%s' "$p" | tr '\\' '/')";      printf 'file:///%s' "$(uri_escape "$p")" ;;
+    *)              printf 'file://%s' "$(uri_escape "$p")" ;;
+  esac
+}
+
+# shown_path <abs-path> : the Windows form under WSL, else the path itself
+shown_path() {
+  if is_wsl && command -v wslpath >/dev/null 2>&1; then
+    wslpath -w "$1" 2>/dev/null && return
+  fi
+  printf '%s' "$1"
+}
+
+# print_link <store-dir> : where the files are, a clickable link, and the open command
+print_link() {
+  local dir="$1" shown uri
+  shown="$(shown_path "$dir")"
+  uri="$(file_uri "$shown")"
+  echo "  Quarantined agent files: $shown"
+  if [ -t 1 ]; then
+    printf '  Link (Ctrl+click): \033]8;;%s\033\\%s\033]8;;\033\\\n' "$uri" "$uri"
+  else
+    echo "  Link: $uri"
+  fi
+  case "$shown" in *"'"*) return ;; esac   # no safe one-line quoting for both shells
+  if is_wsl; then
+    echo "  Open in Explorer (same command in WSL and PowerShell):"
+    echo "    explorer.exe '$shown'"
+  elif [ "$(uname -s)" = Darwin ]; then
+    echo "  Open in Finder:  open '$dir'"
+  else
+    echo "  Open:  xdg-open '$dir'"
+  fi
+}
+
+# ---- commands --------------------------------------------------------------
+
+quarantine_one() {
+  local repo="$1" store="$1/$STORE_NAME" items=() inner=() p q rel dest moved=0 failed=0
+  while IFS= read -r -d '' p; do items+=("$p"); done < <(find_live "$repo")
+  if [ "${#items[@]}" -eq 0 ]; then
+    echo "$repo: no live agent files"
+    [ -d "$store" ] && print_link "$store"
+    return 0
+  fi
+  mkdir -p "$store" || return 1
+  [ -f "$store/MANIFEST.tsv" ] || printf '# agent-quarantine: one move per line, <from>TAB<to>, relative to the repo. restore replays it bottom-up.\n' >"$store/MANIFEST.tsv"
+  # Keep git from listing the quarantine as untracked (local-only exclude file).
+  if [ -d "$repo/.git/info" ] && ! grep -qxF "/$STORE_NAME/" "$repo/.git/info/exclude" 2>/dev/null; then
+    echo "/$STORE_NAME/" >>"$repo/.git/info/exclude"
+  fi
+  for p in "${items[@]}"; do
+    rel="${p#"$repo"/}"
+    case "$rel" in *$'\t'*|*$'\n'*) warn "skipped a name with a tab or newline: $rel"; failed=1; continue ;; esac
+    # Suffix every agent name inside a moved folder first, deepest first, so
+    # nothing under .agent-quarantine keeps a name an agent would load.
+    if [ -d "$p" ] && [ ! -L "$p" ]; then
+      inner=()
+      while IFS= read -r -d '' q; do inner+=("$q"); done \
+        < <(find "$p" -mindepth 1 -depth \( "${NAME_EXPR[@]}" \) -print0)
+      for q in ${inner[@]+"${inner[@]}"}; do
+        dest="$(free_path "$q$SUFFIX")"
+        move_op "$repo" "${q#"$repo"/}" "${dest#"$repo"/}" || failed=1
+      done
+    fi
+    dest="$(free_path "$store/$rel$SUFFIX")"
+    if move_op "$repo" "$rel" "${dest#"$repo"/}"; then moved=$((moved + 1)); else failed=1; fi
+  done
+  echo "$repo: quarantined $moved agent file(s)/folder(s)"
+  print_link "$store"
+  return "$failed"
+}
+
+restore_one() {
+  local repo="$1" store="$1/$STORE_NAME" manifest="$1/$STORE_NAME/MANIFEST.tsv"
+  local froms=() tos=() keep=() from to line i restored=0 kept=0
+  if [ ! -f "$manifest" ]; then echo "$repo: nothing quarantined"; return 0; fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in '#'*|'') continue ;; esac
+    froms+=("${line%%$'\t'*}"); tos+=("${line#*$'\t'}")
+  done <"$manifest"
+  i=$(( ${#froms[@]} - 1 ))
+  while [ "$i" -ge 0 ]; do
+    from="${froms[$i]}"; to="${tos[$i]}"
+    if ! exists "$repo/$to"; then
+      warn "$to is missing; cannot restore $from"; keep[$i]=1; kept=$((kept + 1))
+    elif exists "$repo/$from"; then
+      warn "$from exists again (did a git pull bring it back?); quarantined copy kept at $to"
+      keep[$i]=1; kept=$((kept + 1))
+    elif mkdir -p "$(dirname "$repo/$from")" && mv "$repo/$to" "$repo/$from"; then
+      restored=$((restored + 1))
+    else
+      warn "could not move $to back to $from"; keep[$i]=1; kept=$((kept + 1))
+    fi
+    i=$((i - 1))
+  done
+  if [ "$kept" -gt 0 ]; then
+    { printf '# agent-quarantine: one move per line, <from>TAB<to>, relative to the repo. restore replays it bottom-up.\n'
+      i=0
+      while [ "$i" -lt "${#froms[@]}" ]; do
+        [ -n "${keep[$i]:-}" ] && printf '%s\t%s\n' "${froms[$i]}" "${tos[$i]}"
+        i=$((i + 1))
+      done; } >"$manifest.tmp" && mv "$manifest.tmp" "$manifest"
+    echo "$repo: restored $restored, kept $kept in quarantine"
+    print_link "$store"
+    return 1
+  fi
+  rm -f "$manifest"
+  find "$store" -depth -type d -empty -exec rmdir {} \; 2>/dev/null
+  if [ -d "$store" ]; then
+    echo "$repo: restored $restored; $STORE_NAME still holds files not in the manifest"
+    print_link "$store"
+    return 1
+  fi
+  echo "$repo: restored $restored agent file(s)/folder(s)"
+  return 0
+}
+
+status_one() {
+  local repo="$1" store="$1/$STORE_NAME" live=() p n=0 rc=0
+  while IFS= read -r -d '' p; do live+=("${p#"$repo"/}"); done < <(find_live "$repo")
+  if [ -f "$store/MANIFEST.tsv" ]; then
+    n="$(grep -c $'\t'"$STORE_NAME/" "$store/MANIFEST.tsv" || true)"
+  fi
+  if [ "${#live[@]}" -gt 0 ]; then
+    echo "$repo: ${#live[@]} LIVE agent file(s)/folder(s), $n quarantined"
+    for p in "${live[@]}"; do echo "    live: $p"; done
+    rc=1
+  else
+    echo "$repo: no live agent files, $n quarantined"
+  fi
+  [ "$n" -gt 0 ] && print_link "$store"
+  return "$rc"
+}
+
+# report <repo> : what the quarantined config would do. Output is untrusted text
+# from the repo; lines are cut to 240 characters.
+report_one() {
+  local repo="$1" store="$1/$STORE_NAME" hits rc=0
+  if [ ! -d "$store" ]; then echo "$repo: nothing quarantined; run: agent-quarantine quarantine '$repo'"; return 0; fi
+  ( cd "$store" || exit 2
+    section() { printf '\n## %s\n' "$1"; }
+    show() { if [ -n "$1" ]; then printf '%s\n' "$1" | cut -c1-240; else echo "  (none)"; fi; }
+    echo "# Agent config quarantined in $repo"
+    section "Moved items"
+    show "$(grep -v '^#' MANIFEST.tsv 2>/dev/null | awk -F'\t' -v s="$STORE_NAME/" 'index($2, s) == 1 {print "  " $1}')"
+    section "Commands in JSON config (hooks, MCP stdio servers)"
+    show "$(grep -rInE '"command"[[:space:]]*:' --include='*.json*' . 2>/dev/null)"
+    section "URLs in JSON config (remote MCP servers, hook endpoints)"
+    show "$(grep -rInE '"(url|endpoint|serverUrl)"[[:space:]]*:' --include='*.json*' . 2>/dev/null)"
+    section "Hooks and tool grants in Markdown frontmatter"
+    show "$(grep -rInE '^(hooks|allowed-tools|allowedTools)[[:space:]]*:' --include='*.md*' . 2>/dev/null)"
+    section "Shell lines in skills and commands (!\`...\`)"
+    show "$(grep -rInE '!`' --include='*.md*' . 2>/dev/null)"
+    section "Suspicious text (review each)"
+    hits="$(grep -rInIE 'curl[^|]*\|[[:space:]]*(ba|z)?sh|wget[^|]*\|[[:space:]]*(ba|z)?sh|base64[[:space:]]+(-d|--decode)|ignore (all )?(previous|prior|above) instructions|do not (tell|inform|mention)[^.]* (the )?user|\.ssh/|\.aws/credentials|id_rsa|/etc/passwd|nc[[:space:]]+-e|bash[[:space:]]+-i[[:space:]]*>|dangerously-?skip-?permissions|bypassPermissions' . 2>/dev/null)"
+    show "$hits"
+    [ -z "$hits" ] ) || rc=1
+  return "$rc"
+}
+
+open_one() {
+  local store="$1/$STORE_NAME" shown
+  [ -d "$store" ] || die "$1 has no $STORE_NAME folder"
+  shown="$(shown_path "$store")"
+  if is_wsl; then
+    explorer.exe "$shown" || true   # explorer.exe exits 1 even when it opens the window
+  elif [ "$(uname -s)" = Darwin ]; then
+    open "$store"
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$store"
+  else
+    die "no file manager opener found; the folder is $store"
+  fi
+  print_link "$store"
+}
+
+# ---- args ------------------------------------------------------------------
+CMD="${1:-}"; [ $# -gt 0 ] && shift
+EACH=0; TARGET=""
+for a in "$@"; do
+  case "$a" in
+    --each) EACH=1 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "unknown option $a" ;;
+    *) [ -z "$TARGET" ] || die "one PATH only"; TARGET="$a" ;;
+  esac
+done
+case "$CMD" in
+  quarantine|restore|status|report|open) ;;
+  -h|--help|help) usage; exit 0 ;;
+  *) usage >&2; exit 2 ;;
+esac
+[ -n "$TARGET" ] || die "PATH is required"
+[ -d "$TARGET" ] || die "'$TARGET' is not a directory"
+TARGET="$(cd "$TARGET" && pwd)"
+[ "$TARGET" = / ] || [ "$TARGET" = "$(cd "$HOME" && pwd)" ] && die "refusing to act on $TARGET; name a repo or use --each on its parent"
+
+if [ "$EACH" = 1 ]; then
+  case "$CMD" in report|open) die "--each works with quarantine, restore and status" ;; esac
+  rc=0
+  for d in "$TARGET"/*/; do
+    [ -d "$d" ] || continue
+    d="${d%/}"
+    [ -L "$d" ] && continue
+    "${CMD}_one" "$d" || rc=1
+  done
+  exit "$rc"
+fi
+
+# A folder of repos is almost certainly a mistake without --each.
+if [ "$CMD" = quarantine ] && ! exists "$TARGET/.git"; then
+  for d in "$TARGET"/*/; do
+    if exists "${d}.git"; then die "$TARGET holds git repos; use --each to quarantine each of them"; fi
+  done
+fi
+"${CMD}_one" "$TARGET"

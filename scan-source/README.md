@@ -16,6 +16,7 @@ scanner miss:
 
 | Layer | Tool | Catches |
 |-------|------|---------|
+| 0 — agent config | `agent-quarantine` (bundled) | third-party `CLAUDE.md`/`AGENTS.md`/skills/hooks/MCP config: moved aside so no agent loads them, then reported |
 | 1 — malware / supply-chain | [GuardDog](https://github.com/DataDog/guarddog) | malicious install scripts, obfuscation, typosquats |
 | 2 — known CVEs + secrets | [Trivy](https://github.com/aquasecurity/trivy), [OSV-Scanner](https://github.com/google/osv-scanner), [pip-audit](https://github.com/pypa/pip-audit) | vulnerable deps, leaked secrets, misconfigs |
 | 3 — insecure code (SAST) | [Semgrep](https://github.com/semgrep/semgrep) | injection, hardcoded secrets, dangerous calls |
@@ -48,6 +49,37 @@ bash skills/scan-source/scripts/scan-download --quick /path/to/repo # skip Semgr
 
 A full log is written to `<repo>/.scan-reports/scan-<timestamp>.log`. Exit code:
 `0` = clean, `1` = findings present, `2` = usage error.
+
+## Quarantining agent instructions in third-party repos
+
+A cloned repo's `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.claude/` (skills, rules,
+hooks), `.mcp.json`, `.codex/`, `.gemini/`, `.cursor/`, Copilot instructions and
+similar files are instructions for whatever agent opens the repo. Claude Code loads
+a subfolder's `CLAUDE.md` and skills as soon as it reads any file in that folder, so
+scanning a repo with an agent would otherwise load the repo's own instructions.
+
+`agent-quarantine` moves them into `<repo>/.agent-quarantine/` (each name gets a
+`.quarantined` suffix, so no agent CLI recognizes it) while the scanners still read
+every file. Every move is recorded in `.agent-quarantine/MANIFEST.tsv`, and
+`restore` puts everything back exactly.
+
+```bash
+A=skills/scan-source/scripts/agent-quarantine
+bash $A quarantine /path/to/repo           # move agent files aside (the scan does this too)
+bash $A quarantine --each ~/GitHub/3rdParty # every repo in a folder
+bash $A status --each ~/GitHub/3rdParty     # which repos still have live agent files
+bash $A report /path/to/repo               # hooks, MCP servers, skill shell lines, suspicious text
+bash $A open /path/to/repo                 # open the quarantine folder (Explorer under WSL)
+bash $A restore /path/to/repo              # put everything back
+```
+
+Each command prints the quarantine folder, a `file://` link, and under WSL an
+`explorer.exe '<path>'` command that works the same from WSL and PowerShell.
+
+Files stay quarantined after a scan. Restore before `git pull` (git refuses to
+update tracked files that are missing), then quarantine again. If a pull brings a
+file back, `restore` keeps the quarantined copy instead of overwriting it.
+`scan-download --no-quarantine` skips this layer.
 
 ## Installing the tools
 

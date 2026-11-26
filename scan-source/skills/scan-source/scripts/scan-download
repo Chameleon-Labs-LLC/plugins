@@ -5,8 +5,12 @@
 # Usage:
 #   scan-download [PATH]          # scan PATH (default: current directory)
 #   scan-download --quick [PATH]  # skip the slower SAST (semgrep) pass
+#   scan-download --no-quarantine [PATH]  # leave agent instruction files in place
 #
 # Layers:
+#   0. AGENT CONFIG            (agent-quarantine) - moves CLAUDE.md, AGENTS.md,
+#      .claude/, .mcp.json, ... into PATH/.agent-quarantine/ so no agent CLI
+#      loads them, and reports the hooks, MCP servers and shell lines they hold
 #   1. MALWARE / supply-chain  (guarddog)   - the "recent attacks" layer
 #   2. KNOWN VULNS + SECRETS   (trivy, osv-scanner, pip-audit)
 #   3. INSECURE CODE PATTERNS  (semgrep)    - SAST on the source itself
@@ -21,11 +25,13 @@ set -uo pipefail
 
 # ---- args ----------------------------------------------------------------
 QUICK=0
+QUARANTINE=1
 TARGET="."
 for a in "$@"; do
   case "$a" in
     --quick) QUICK=1 ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    --no-quarantine) QUARANTINE=0 ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) TARGET="$a" ;;
   esac
 done
@@ -164,6 +170,35 @@ if find "$TARGET" -maxdepth 3 \( -name '*.py' -o -name 'requirements*.txt' -o -n
 if find "$TARGET" -maxdepth 3 \( -name package.json -o -name package-lock.json -o -name yarn.lock \) -print -quit | grep -q .; then has_js=1; fi
 
 # =========================================================================
+section "LAYER 0  AGENT CONFIG  (agent-quarantine)"
+# =========================================================================
+# Third-party CLAUDE.md, AGENTS.md, skills, hooks and MCP config are untrusted
+# instructions. Move them aside before anything reads the tree, then report
+# what they would do. They stay quarantined; `agent-quarantine restore` undoes it.
+AQ="$(cd "$(dirname "$0")" && pwd)/agent-quarantine"
+if [ "$QUARANTINE" = 0 ]; then
+  skip "agent-config" "--no-quarantine"
+elif [ ! -f "$AQ" ]; then
+  skip "agent-config" "agent-quarantine script missing"
+else
+  printf '\n--- agent-quarantine quarantine ---\n' >>"$LOG"
+  "$BASH" "$AQ" quarantine "$TARGET" 2>&1 | tee -a "$LOG" | sed 's/^/  /'
+  aq_rc="${PIPESTATUS[0]}"
+  if [ "$aq_rc" = 0 ]; then
+    printf '\n--- agent-quarantine report ---\n' >>"$LOG"
+    "$BASH" "$AQ" report "$TARGET" >>"$LOG" 2>&1; aq_rc=$?
+  else
+    aq_rc=2   # quarantine failed or was refused: no trustworthy report
+  fi
+  case "$aq_rc" in
+    0) set_result agent-config CLEAN;    printf '  %sagent-config: nothing suspicious (inventory in log)%s\n' "$c_ok" "$c_off" ;;
+    1) set_result agent-config FINDINGS; printf '  %sagent-config: SUSPICIOUS TEXT in agent files (see log)%s\n' "$c_bad" "$c_off" ;;
+    *) set_result agent-config "SKIP: agent-quarantine error (exit $aq_rc)"
+       printf '  %sagent-config: error (exit %s)%s\n' "$c_warn" "$aq_rc" "$c_off" ;;
+  esac
+fi
+
+# =========================================================================
 section "LAYER 1  MALWARE / SUPPLY-CHAIN  (guarddog)"
 # =========================================================================
 if have guarddog; then
@@ -262,7 +297,7 @@ section "SUMMARY"
 # =========================================================================
 overall=0
 # stable-ish ordering
-order=(gd_py gd_js trivy osv pipaudit semgrep socket)
+order=(agent-config gd_py gd_js trivy osv pipaudit semgrep socket)
 printed=()
 print_row() {
   local k="$1" v
