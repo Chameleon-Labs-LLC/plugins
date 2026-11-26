@@ -68,10 +68,11 @@ CPU (Intel or Apple silicon).
 **CRLF error:** `$'\r': command not found` or `set: pipefail: invalid option name`
 means that a Windows git clone with `core.autocrlf=true` converted the scripts to
 CRLF. The repo's `.gitattributes` prevents this on new clones. For an old clone,
-make LF copies of both scripts in one scratchpad folder (`scan-download` runs the
-`agent-quarantine` beside it) and point `SCRIPTS` there:
+make LF copies of the three scripts in one scratchpad folder (`scan-download` runs
+the `agent-quarantine` beside it) and point `SCRIPTS` there:
 `SCRIPTS=<scratchpad>/scan-scripts; mkdir -p "$SCRIPTS"; for s in scan-download
-agent-quarantine; do tr -d '\r' < "$SKILL_DIR/scripts/$s" > "$SCRIPTS/$s"; done`.
+agent-quarantine install-security-scanners.sh; do tr -d '\r' <
+"$SKILL_DIR/scripts/$s" > "$SCRIPTS/$s"; done`.
 Do not edit the plugin cache.
 
 ### 1. Identify the target, then quarantine its agent files before anything else

@@ -125,9 +125,10 @@ store_ok() {
 
 # journal <repo> : this repo's journal file, outside the repo
 journal() {
-  local key
+  local key name
   key="$(printf '%s' "$1" | cksum | awk '{print $1 "-" $2}')"
-  printf '%s/%s-%s.tsv' "$STATE_DIR" "$(basename "$1" | tr -c 'A-Za-z0-9._-' '_')" "$key"
+  name="$(printf '%s' "${1##*/}" | tr -c 'A-Za-z0-9._-' '_')"
+  printf '%s/%s-%s.tsv' "$STATE_DIR" "$name" "$key"
 }
 
 # free_path <abs-path> : the path itself if unused, else <path>.2, <path>.3, ...
@@ -227,15 +228,12 @@ quarantine_one() {
   fi
   mkdir -p "$STATE_DIR" && chmod 700 "$STATE_DIR" 2>/dev/null
   if [ ! -f "$j" ]; then
-    printf '# agent-quarantine journal for %s: <from>TAB<to>, relative to the repo, one move per line\n' "$repo" >"$j" \
+    printf '# agent-quarantine journal v1: <from>TAB<to>, relative to the repo, one move per line\n' >"$j" \
       || { warn "cannot write the journal $j; nothing moved"; return 1; }
   fi
   mkdir -p "$store" || return 1
-  # Keep git from listing the quarantine as untracked (local-only exclude file).
-  if [ -d "$repo/.git/info" ] && [ ! -L "$repo/.git" ] && [ ! -L "$repo/.git/info" ] \
-     && [ ! -L "$repo/.git/info/exclude" ] && ! grep -qxF "/$STORE_NAME/" "$repo/.git/info/exclude" 2>/dev/null; then
-    echo "/$STORE_NAME/" >>"$repo/.git/info/exclude"
-  fi
+  # Deliberately NOT added to .git/info/exclude: Semgrep and other scanners use
+  # git's ignore rules to pick files, and would then skip the quarantined hooks.
   for p in "${items[@]}"; do
     rel="${p#"$repo"/}"
     # Suffix every agent name inside a moved folder first, deepest first, so
@@ -260,7 +258,7 @@ quarantine_one() {
 
 restore_one() {
   local repo="$1" store="$1/$STORE_NAME" j froms=() tos=() done_=() blocked=() from to line i b
-  local restored=0 kept=0 skip tmp
+  local restored=0 kept=0 skip tmp recs
   store_ok "$repo" || return 1
   j="$(journal "$repo")"
   if [ ! -f "$j" ]; then
@@ -268,10 +266,17 @@ restore_one() {
     [ -d "$store" ] && warn "$store exists without a journal; restore its contents by hand if they are yours"
     return 0
   fi
+  # Read the journal through a checked step: an unreadable journal must stop
+  # restore before anything moves or the journal is deleted.
+  recs="$(mktemp "${TMPDIR:-/tmp}/agent-quarantine.XXXXXX")" || return 2
+  if [ ! -r "$j" ] || ! tail -n +2 "$j" >"$recs"; then
+    rm -f "$recs"; warn "cannot read the journal $j; nothing restored"; return 2
+  fi
   while IFS= read -r line || [ -n "$line" ]; do
     froms+=("${line%%$'\t'*}")
     case "$line" in *$'\t'*) tos+=("${line#*$'\t'}") ;; *) tos+=("") ;; esac
-  done < <(rows "$j")
+  done <"$recs"
+  rm -f "$recs"
 
   # write_journal : the header plus every row not yet restored
   write_journal() {
@@ -298,6 +303,11 @@ restore_one() {
     elif ! no_link_parents "$repo" "$from" || ! no_link_parents "$repo" "$to"; then
       warn "a folder on the path of $from is now a symlink; kept in quarantine at $to"
       kept=$((kept + 1)); blocked+=("$from")
+    elif ! exists "$repo/$to" && exists "$repo/$from"; then
+      # The quarantined copy was deleted and the original is back: the user
+      # resolved a conflict by keeping the original. Drop the record.
+      done_[$i]=1
+      write_journal || warn "could not save restore progress to $j"
     elif ! exists "$repo/$to"; then
       warn "$to is missing; cannot restore $from"; kept=$((kept + 1)); blocked+=("$from")
     elif exists "$repo/$from"; then

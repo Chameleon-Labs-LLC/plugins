@@ -58,7 +58,7 @@ check   "inner CLAUDE.md suffixed too"                 test -f "$R/.agent-quaran
 nocheck "no loadable name inside the quarantine"       test -e "$R/.agent-quarantine/.claude.quarantined/CLAUDE.md"
 check   "journal kept outside the repo"                 test -n "$(ls "$W/state"/*.tsv 2>/dev/null)"
 nocheck "no manifest inside the repo"                  test -e "$R/.agent-quarantine/MANIFEST.tsv"
-check   "git exclude lists the quarantine"             grep -qxF '/.agent-quarantine/' "$R/.git/info/exclude"
+nocheck "git exclude untouched (scanners must see it)" grep -qF '.agent-quarantine' "$R/.git/info/exclude"
 check   "status: nothing live"                         "$BASH" "$AQ" status "$R"
 
 rep="$("$BASH" "$AQ" report "$R" 2>&1)"; rc=$?
@@ -150,6 +150,29 @@ mkdir -p "$K/.claude"; echo unrelated >"$K/.claude/CLAUDE.md.quarantined"
 "$BASH" "$AQ" restore "$K" >/dev/null 2>&1
 check   "kept folder: unrelated file not renamed"      grep -qx unrelated "$K/.claude/CLAUDE.md.quarantined"
 nocheck "kept folder: no CLAUDE.md conjured"           test -e "$K/.claude/CLAUDE.md"
+
+# Resolving a conflict by keeping the original and deleting the quarantined
+# copy clears the record (CodeRabbit).
+C="$W/conflict"; mkdir -p "$C"; echo old >"$C/CLAUDE.md"
+"$BASH" "$AQ" quarantine "$C" >/dev/null 2>&1
+echo new >"$C/CLAUDE.md"
+"$BASH" "$AQ" restore "$C" >/dev/null 2>&1
+rm "$C/.agent-quarantine/CLAUDE.md.quarantined"
+"$BASH" "$AQ" restore "$C" >/dev/null 2>&1; rc=$?
+check   "kept original + deleted copy: restore exits 0" test "$rc" = 0
+check   "kept original stays"                          grep -qx new "$C/CLAUDE.md"
+
+# An unreadable journal stops restore and is not deleted (CodeRabbit).
+if [ "$(id -u)" != 0 ]; then
+  U2="$W/unread"; mkdir -p "$U2"; echo x >"$U2/CLAUDE.md"
+  "$BASH" "$AQ" quarantine "$U2" >/dev/null 2>&1
+  J="$(ls "$W/state"/unread-*.tsv)"; chmod 000 "$J"
+  "$BASH" "$AQ" restore "$U2" >/dev/null 2>&1; rc=$?
+  chmod 600 "$J"
+  check "unreadable journal: restore exits 2"          test "$rc" = 2
+  check "unreadable journal: journal kept"             test -f "$J"
+  check "unreadable journal: copy still quarantined"   test -f "$U2/.agent-quarantine/CLAUDE.md.quarantined"
+fi
 
 # A path that starts with # is a move, not a comment (CodeRabbit).
 P="$W/hash"; mkdir -p "$P/#docs"; echo h >"$P/#docs/CLAUDE.md"
