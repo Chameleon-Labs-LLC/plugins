@@ -35,7 +35,7 @@ printf 'benign-thing\n' >"$W/allow.txt"
 if [ "$MODE" = --no-timeout ]; then
   U="$W/util"; mkdir -p "$U"
   for c in date mkdir find grep head awk tee sed sleep mktemp rm pkill uname cat sh env \
-           mv rmdir dirname cut tr; do
+           mv rmdir dirname cut tr cksum tail chmod basename; do
     p="$(command -v "$c")" && ln -s "$p" "$U/$c"
   done
   P="$FB:$U"
@@ -61,6 +61,7 @@ expect 'gd_py +FINDINGS'                       'guarddog indicators survive the 
 expect 'allowlist|1 INDICATOR'                 'allowlist suppressed the benign indicator'
 expect 'agent-config +FINDINGS'                'agent instructions are quarantined and flagged'
 expect 'Quarantined agent files:'              'prints where the agent files went'
+expect 'SUSPICIOUS TEXT in agent files'        'report detected the fixture curl-pipe-sh'
 if [ -e "$W/target/CLAUDE.md" ]; then echo "FAIL: CLAUDE.md still live" >&2; fail=1; else echo "PASS: CLAUDE.md moved out"; fi
 expect 'trivy +clean'                          'trivy exit 0 is clean'
 expect 'osv +FINDINGS'                         'osv-scanner exit 1 is a finding'

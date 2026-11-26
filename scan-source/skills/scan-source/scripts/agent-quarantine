@@ -12,7 +12,8 @@
 #   agent-quarantine open       PATH            open PATH/.agent-quarantine in Explorer (WSL),
 #                                               Finder (macOS) or xdg-open (Linux)
 #
-#   --each   PATH is a folder of repos: act on every direct subfolder.
+#   --each   PATH is a folder of repos: act on every direct subfolder. Hidden
+#            subfolders and symlinked subfolders are skipped.
 #
 # Why: Claude Code loads a subfolder's CLAUDE.md, AGENTS.md, .claude/rules and
 # .claude/skills the first time it reads any file there, and the other agent
@@ -21,18 +22,21 @@
 # ".quarantined" suffix (and every agent name inside a moved folder is suffixed
 # too), so nothing recognises it while the scanners still read every file.
 #
-# Every move is one line of .agent-quarantine/MANIFEST.tsv; restore replays the
-# manifest bottom-up and never overwrites a file that exists again (for example
-# after a `git pull`). Restore before pulling: git refuses to update tracked
-# files that are missing from the working tree.
+# Every move is one line of a journal kept OUTSIDE the repo, in
+# ${AGENT_QUARANTINE_STATE:-${XDG_STATE_HOME:-~/.local/state}/agent-quarantine}/,
+# so a repo cannot ship a forged one. restore replays it bottom-up, saves its
+# progress after every move, never overwrites a file that exists again (for
+# example after a `git pull`), and never moves through a symlinked folder.
 #
-# Exit codes: 0 ok; 1 needs attention (restore conflict, live agent files in
-# status, suspicious text in report); 2 usage error.
+# Exit codes: 0 ok; 1 needs attention (something not moved or not restored,
+# live agent files in status, suspicious text in report); 2 usage error or a
+# failed read.
 #
 set -uo pipefail
 
 STORE_NAME=.agent-quarantine
 SUFFIX=.quarantined
+STATE_DIR="${AGENT_QUARANTINE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-quarantine}"
 
 # Matched by exact name (case-insensitive) at any depth, files or folders.
 AGENT_NAMES=(
@@ -55,7 +59,7 @@ NAME_EXPR=("${NAME_EXPR[@]:1}")   # drop the leading -o
 
 die()  { echo "agent-quarantine: $*" >&2; exit 2; }
 warn() { echo "  WARNING: $*" >&2; }
-usage() { sed -n '2,32p' "$0"; }
+usage() { sed -n '2,34p' "$0"; }
 
 case "$(uname -s 2>/dev/null)" in
   MINGW*|MSYS*|CYGWIN*)
@@ -65,53 +69,65 @@ case "$(uname -s 2>/dev/null)" in
 esac
 
 exists() { [ -e "$1" ] || [ -L "$1" ]; }
-
 glob_escape() { printf '%s' "$1" | sed 's/[][*?\\]/\\&/g'; }
 
-# find_live <repo> : NUL-separated agent files/folders still in place. Skips only
-# the repo's own top-level .git; everything else is searched, the quarantine
-# included (a stored item never keeps a bare agent name, so a match there was
-# planted), because a name-based skip anywhere is a hiding place.
-find_live() {
-  find "$1" -mindepth 1 -path "$(glob_escape "$1")/.git" -prune \
+# collect <find arguments...> : run find, fill FOUND with its NUL-separated
+# output, and return find's own status, so an unreadable subtree is an error
+# rather than "nothing found".
+FOUND=()
+collect() {
+  local tmp rc p
+  FOUND=()
+  tmp="$(mktemp "${TMPDIR:-/tmp}/agent-quarantine.XXXXXX")" || return 2
+  find "$@" >"$tmp"; rc=$?
+  while IFS= read -r -d '' p; do FOUND+=("$p"); done <"$tmp"
+  rm -f "$tmp"
+  return "$rc"
+}
+
+# collect_live <repo> : agent files/folders still in place. Skips only the repo's
+# own top-level .git; everything else is searched, the quarantine included (a
+# stored item never keeps a bare agent name, so a match there was planted),
+# because a name-based skip anywhere is a hiding place.
+collect_live() {
+  collect "$1" -mindepth 1 -path "$(glob_escape "$1")/.git" -prune \
     -o \( "${NAME_EXPR[@]}" \) -print0 -prune
 }
 
-# safe_rel <rel> : a relative path with no empty, "." or ".." parts and no tab
-# or newline. Manifest lines and moves must pass it.
+# safe_rel <rel> : a relative path with no empty, "." or ".." parts, no tab or
+# newline, and no .git component.
 safe_rel() {
   case "$1" in ''|/*|*$'\t'*|*$'\n'*) return 1 ;; esac
   case "/$1/" in */../*|*/./*|*//*) return 1 ;; esac
-  # Never into or out of git's own folder: a forged manifest could plant hooks.
   case "$(printf '%s' "/$1/" | tr '[:upper:]' '[:lower:]')" in */.git/*) return 1 ;; esac
   return 0
 }
 
-# in_repo <repo-real> <abs-path> : the nearest existing folder at or above the
-# path's parent resolves (symlinks followed) inside the repo.
-in_repo() {
-  local real="$1" d
+# no_link_parents <repo> <rel> : no folder between the repo and rel is a
+# symlink, so a move cannot be redirected (into .git, or out of the repo).
+no_link_parents() {
+  local d
   d="$(dirname "$2")"
-  while [ ! -d "$d" ]; do d="$(dirname "$d")"; done
-  d="$(cd "$d" 2>/dev/null && pwd -P)" || return 1
-  case "$d/" in "$real"/*) return 0 ;; esac
-  return 1
+  while [ "$d" != . ] && [ "$d" != / ]; do
+    [ -L "$1/$d" ] && return 1
+    d="$(dirname "$d")"
+  done
+  return 0
 }
 
-# store_ok <repo> : the quarantine folder and manifest are not symlinks
+# store_ok <repo> : the quarantine folder is a real folder, not a symlink
 store_ok() {
-  if [ -L "$1/$STORE_NAME" ] || [ -L "$1/$STORE_NAME/MANIFEST.tsv" ]; then
-    warn "$1/$STORE_NAME or its MANIFEST.tsv is a symlink; refusing to use it"
-    return 1
-  fi
-  if exists "$1/$STORE_NAME/MANIFEST.tsv" && [ ! -f "$1/$STORE_NAME/MANIFEST.tsv" ]; then
-    warn "$1/$STORE_NAME/MANIFEST.tsv is not a regular file; refusing to use it"
-    return 1
-  fi
+  if [ -L "$1/$STORE_NAME" ]; then warn "$1/$STORE_NAME is a symlink; refusing to use it"; return 1; fi
   if exists "$1/$STORE_NAME" && [ ! -d "$1/$STORE_NAME" ]; then
-    warn "$1/$STORE_NAME is not a folder; refusing to use it"
-    return 1
+    warn "$1/$STORE_NAME is not a folder; refusing to use it"; return 1
   fi
+}
+
+# journal <repo> : this repo's journal file, outside the repo
+journal() {
+  local key
+  key="$(printf '%s' "$1" | cksum | awk '{print $1 "-" $2}')"
+  printf '%s/%s-%s.tsv' "$STATE_DIR" "$(basename "$1" | tr -c 'A-Za-z0-9._-' '_')" "$key"
 }
 
 # free_path <abs-path> : the path itself if unused, else <path>.2, <path>.3, ...
@@ -122,18 +138,25 @@ free_path() {
   printf '%s' "$p.$n"
 }
 
-# move_op <repo> <from-rel> <to-rel> : mv and append to the manifest
+# move_op <repo> <journal> <from-rel> <to-rel> : mv and record it. If the record
+# cannot be written the move is undone, so nothing is ever moved unrecorded.
 move_op() {
-  local repo="$1" from="$2" to="$3" real
+  local repo="$1" j="$2" from="$3" to="$4"
   if ! safe_rel "$from" || ! safe_rel "$to"; then warn "unsafe path, left in place: $from"; return 1; fi
-  real="$(cd "$repo" && pwd -P)"
-  if ! in_repo "$real" "$repo/$from" || ! in_repo "$real" "$repo/$to"; then
-    warn "path leaves the repo through a symlink, left in place: $from"; return 1
+  if ! no_link_parents "$repo" "$from" || ! no_link_parents "$repo" "$to"; then
+    warn "path runs through a symlinked folder, left in place: $from"; return 1
   fi
   mkdir -p "$(dirname "$repo/$to")" || return 1
   if exists "$repo/$to"; then warn "$to already exists; left $from in place"; return 1; fi
   mv "$repo/$from" "$repo/$to" || return 1
-  printf '%s\t%s\n' "$from" "$to" >>"$repo/$STORE_NAME/MANIFEST.tsv"
+  if ! printf '%s\t%s\n' "$from" "$to" >>"$j"; then
+    if mv "$repo/$to" "$repo/$from"; then
+      warn "could not write the journal $j; moved $from back"
+    else
+      warn "could not write the journal $j, and could not move it back: $repo/$from is at $repo/$to"
+    fi
+    return 1
+  fi
 }
 
 is_wsl() { [ -n "${WSL_DISTRO_NAME:-}" ] || grep -qi microsoft /proc/version 2>/dev/null; }
@@ -180,19 +203,34 @@ print_link() {
   fi
 }
 
+# rows <journal> : the journal's move records (every line after the header)
+rows() { [ -f "$1" ] && tail -n +2 "$1"; }
+
 # ---- commands --------------------------------------------------------------
 
 quarantine_one() {
-  local repo="$1" store="$1/$STORE_NAME" items=() inner=() p q rel dest moved=0 failed=0
+  local repo="$1" store="$1/$STORE_NAME" j items=() inner=() p q rel dest moved=0 failed=0
   store_ok "$repo" || return 1
-  while IFS= read -r -d '' p; do items+=("$p"); done < <(find_live "$repo")
+  j="$(journal "$repo")"
+  if [ -d "$store" ] && [ ! -f "$j" ]; then
+    warn "$store exists but has no journal (shipped with the repo, or the repo moved); it is searched like any other folder"
+  fi
+  if ! collect_live "$repo"; then
+    warn "could not read all of $repo; agent files in unreadable folders may still be live"
+    failed=1
+  fi
+  items=(${FOUND[@]+"${FOUND[@]}"})
   if [ "${#items[@]}" -eq 0 ]; then
     echo "$repo: no live agent files"
     [ -d "$store" ] && print_link "$store"
-    return 0
+    return "$failed"
+  fi
+  mkdir -p "$STATE_DIR" && chmod 700 "$STATE_DIR" 2>/dev/null
+  if [ ! -f "$j" ]; then
+    printf '# agent-quarantine journal for %s: <from>TAB<to>, relative to the repo, one move per line\n' "$repo" >"$j" \
+      || { warn "cannot write the journal $j; nothing moved"; return 1; }
   fi
   mkdir -p "$store" || return 1
-  [ -f "$store/MANIFEST.tsv" ] || printf '# agent-quarantine: one move per line, <from>TAB<to>, relative to the repo. restore replays it bottom-up.\n' >"$store/MANIFEST.tsv"
   # Keep git from listing the quarantine as untracked (local-only exclude file).
   if [ -d "$repo/.git/info" ] && [ ! -L "$repo/.git" ] && [ ! -L "$repo/.git/info" ] \
      && [ ! -L "$repo/.git/info/exclude" ] && ! grep -qxF "/$STORE_NAME/" "$repo/.git/info/exclude" 2>/dev/null; then
@@ -200,20 +238,20 @@ quarantine_one() {
   fi
   for p in "${items[@]}"; do
     rel="${p#"$repo"/}"
-    case "$rel" in *$'\t'*|*$'\n'*) warn "skipped a name with a tab or newline: $rel"; failed=1; continue ;; esac
     # Suffix every agent name inside a moved folder first, deepest first, so
     # nothing under .agent-quarantine keeps a name an agent would load.
     if [ -d "$p" ] && [ ! -L "$p" ]; then
-      inner=()
-      while IFS= read -r -d '' q; do inner+=("$q"); done \
-        < <(find "$p" -mindepth 1 -depth \( "${NAME_EXPR[@]}" \) -print0)
+      if ! collect "$p" -mindepth 1 -depth \( "${NAME_EXPR[@]}" \) -print0; then
+        warn "could not read all of $rel; left it in place"; failed=1; continue
+      fi
+      inner=(${FOUND[@]+"${FOUND[@]}"})
       for q in ${inner[@]+"${inner[@]}"}; do
         dest="$(free_path "$q$SUFFIX")"
-        move_op "$repo" "${q#"$repo"/}" "${dest#"$repo"/}" || failed=1
+        move_op "$repo" "$j" "${q#"$repo"/}" "${dest#"$repo"/}" || failed=1
       done
     fi
     dest="$(free_path "$store/$rel$SUFFIX")"
-    if move_op "$repo" "$rel" "${dest#"$repo"/}"; then moved=$((moved + 1)); else failed=1; fi
+    if move_op "$repo" "$j" "$rel" "${dest#"$repo"/}"; then moved=$((moved + 1)); else failed=1; fi
   done
   echo "$repo: quarantined $moved agent file(s)/folder(s)"
   print_link "$store"
@@ -221,52 +259,69 @@ quarantine_one() {
 }
 
 restore_one() {
-  local repo="$1" store="$1/$STORE_NAME" manifest="$1/$STORE_NAME/MANIFEST.tsv"
-  local froms=() tos=() keep=() from to line i restored=0 kept=0 real tmp
+  local repo="$1" store="$1/$STORE_NAME" j froms=() tos=() done_=() blocked=() from to line i b
+  local restored=0 kept=0 skip tmp
   store_ok "$repo" || return 1
-  if [ ! -f "$manifest" ]; then echo "$repo: nothing quarantined"; return 0; fi
-  real="$(cd "$repo" && pwd -P)"
+  j="$(journal "$repo")"
+  if [ ! -f "$j" ]; then
+    echo "$repo: nothing quarantined (no journal at $j)"
+    [ -d "$store" ] && warn "$store exists without a journal; restore its contents by hand if they are yours"
+    return 0
+  fi
   while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in '#'*|'') continue ;; esac
-    froms+=("${line%%$'\t'*}"); tos+=("${line#*$'\t'}")
-  done <"$manifest"
+    froms+=("${line%%$'\t'*}")
+    case "$line" in *$'\t'*) tos+=("${line#*$'\t'}") ;; *) tos+=("") ;; esac
+  done < <(rows "$j")
+
+  # write_journal : the header plus every row not yet restored
+  write_journal() {
+    local k=0
+    tmp="$(mktemp "$STATE_DIR/.journal.XXXXXX")" || return 1
+    { head -n 1 "$j"
+      while [ "$k" -lt "${#froms[@]}" ]; do
+        [ -z "${done_[$k]:-}" ] && printf '%s\t%s\n' "${froms[$k]}" "${tos[$k]}"
+        k=$((k + 1))
+      done; } >"$tmp" && mv "$tmp" "$j"
+  }
+
   i=$(( ${#froms[@]} - 1 ))
   while [ "$i" -ge 0 ]; do
-    from="${froms[$i]}"; to="${tos[$i]}"
-    # The manifest lives in the repo, so a clone can ship a forged one: refuse
-    # any line that could reach outside the repo.
-    if ! safe_rel "$from" || ! safe_rel "$to"; then
-      warn "unsafe manifest line, skipped: $from"; keep[$i]=1; kept=$((kept + 1))
-    elif ! in_repo "$real" "$repo/$from" || ! in_repo "$real" "$repo/$to"; then
-      warn "manifest line leaves the repo through a symlink, skipped: $from"; keep[$i]=1; kept=$((kept + 1))
+    from="${froms[$i]}"; to="${tos[$i]}"; skip=""
+    # A folder kept in quarantine keeps the renames made inside it.
+    for b in ${blocked[@]+"${blocked[@]}"}; do
+      case "$from" in "$b"/*) skip=1 ;; esac
+    done
+    if [ -n "$skip" ]; then
+      kept=$((kept + 1))
+    elif ! safe_rel "$from" || ! safe_rel "$to"; then
+      warn "unsafe journal line, skipped: $from"; kept=$((kept + 1)); blocked+=("$from")
+    elif ! no_link_parents "$repo" "$from" || ! no_link_parents "$repo" "$to"; then
+      warn "a folder on the path of $from is now a symlink; kept in quarantine at $to"
+      kept=$((kept + 1)); blocked+=("$from")
     elif ! exists "$repo/$to"; then
-      warn "$to is missing; cannot restore $from"; keep[$i]=1; kept=$((kept + 1))
+      warn "$to is missing; cannot restore $from"; kept=$((kept + 1)); blocked+=("$from")
     elif exists "$repo/$from"; then
       warn "$from exists again (did a git pull bring it back?); quarantined copy kept at $to"
-      keep[$i]=1; kept=$((kept + 1))
+      kept=$((kept + 1)); blocked+=("$from")
     elif mkdir -p "$(dirname "$repo/$from")" && mv "$repo/$to" "$repo/$from"; then
-      restored=$((restored + 1))
+      restored=$((restored + 1)); done_[$i]=1
+      write_journal || warn "could not save restore progress to $j"
     else
-      warn "could not move $to back to $from"; keep[$i]=1; kept=$((kept + 1))
+      warn "could not move $to back to $from"; kept=$((kept + 1)); blocked+=("$from")
     fi
     i=$((i - 1))
   done
   if [ "$kept" -gt 0 ]; then
-    tmp="$(mktemp "$store/.manifest.XXXXXX")" || return 1   # never a planted path
-    { printf '# agent-quarantine: one move per line, <from>TAB<to>, relative to the repo. restore replays it bottom-up.\n'
-      i=0
-      while [ "$i" -lt "${#froms[@]}" ]; do
-        [ -n "${keep[$i]:-}" ] && printf '%s\t%s\n' "${froms[$i]}" "${tos[$i]}"
-        i=$((i + 1))
-      done; } >"$tmp" && mv "$tmp" "$manifest"
     echo "$repo: restored $restored, kept $kept in quarantine"
+    echo "  Compare each kept copy with the file now in its place, keep the one you want,"
+    echo "  delete the other, and run restore again."
     print_link "$store"
     return 1
   fi
-  rm -f "$manifest"
-  find "$store" -depth -type d -empty -exec rmdir {} \; 2>/dev/null
+  rm -f "$j"
+  [ -d "$store" ] && find "$store" -depth -type d -empty -exec rmdir {} \; 2>/dev/null
   if [ -d "$store" ]; then
-    echo "$repo: restored $restored; $STORE_NAME still holds files not in the manifest"
+    echo "$repo: restored $restored; $STORE_NAME still holds files this tool did not put there"
     print_link "$store"
     return 1
   fi
@@ -275,14 +330,14 @@ restore_one() {
 }
 
 status_one() {
-  local repo="$1" store="$1/$STORE_NAME" live=() p n=0 rc=0
-  while IFS= read -r -d '' p; do live+=("${p#"$repo"/}"); done < <(find_live "$repo")
-  if [ -f "$store/MANIFEST.tsv" ]; then
-    n="$(grep -c $'\t'"$STORE_NAME/" "$store/MANIFEST.tsv" || true)"
-  fi
-  if [ "${#live[@]}" -gt 0 ]; then
-    echo "$repo: ${#live[@]} LIVE agent file(s)/folder(s), $n quarantined"
-    for p in "${live[@]}"; do echo "    live: $p"; done
+  local repo="$1" store="$1/$STORE_NAME" j p n=0 rc=0
+  store_ok "$repo" || return 1
+  j="$(journal "$repo")"
+  if ! collect_live "$repo"; then warn "could not read all of $repo"; rc=1; fi
+  [ -f "$j" ] && n="$(rows "$j" | grep -c $'\t'"$STORE_NAME/" || true)"
+  if [ "${#FOUND[@]}" -gt 0 ]; then
+    echo "$repo: ${#FOUND[@]} LIVE agent file(s)/folder(s), $n quarantined"
+    for p in "${FOUND[@]}"; do echo "    live: ${p#"$repo"/}"; done
     rc=1
   else
     echo "$repo: no live agent files, $n quarantined"
@@ -292,30 +347,34 @@ status_one() {
 }
 
 # report <repo> : what the quarantined config would do. Output is untrusted text
-# from the repo; lines are cut to 240 characters.
+# from the repo; lines are cut to 240 characters. Exit 0 nothing suspicious,
+# 1 suspicious text, 2 a file could not be read (never reported as clean).
 report_one() {
-  local repo="$1" store="$1/$STORE_NAME" hits rc=0
+  local repo="$1" store="$1/$STORE_NAME" j
   store_ok "$repo" || return 2
+  j="$(journal "$repo")"
   if [ ! -d "$store" ]; then echo "$repo: nothing quarantined; run: agent-quarantine quarantine '$repo'"; return 0; fi
   ( cd "$store" || exit 2
+    err=0; out=""
     section() { printf '\n## %s\n' "$1"; }
     show() { if [ -n "$1" ]; then printf '%s\n' "$1" | cut -c1-240; else echo "  (none)"; fi; }
+    g() { out="$(grep "$@" . 2>/dev/null)"; [ $? -gt 1 ] && err=1; }   # grep: 0 match, 1 none, 2 error
     echo "# Agent config quarantined in $repo"
     section "Moved items"
-    show "$(grep -v '^#' MANIFEST.tsv 2>/dev/null | awk -F'\t' -v s="$STORE_NAME/" 'index($2, s) == 1 {print "  " $1}')"
+    show "$(rows "$j" 2>/dev/null | awk -F'\t' -v s="$STORE_NAME/" 'index($2, s) == 1 {print "  " $1}')"
     section "Commands in JSON config (hooks, MCP stdio servers)"
-    show "$(grep -rInE '"command"[[:space:]]*:' --include='*.[jJ][sS][oO][nN]*' . 2>/dev/null)"
+    g -rInE '"command"[[:space:]]*:' --include='*.[jJ][sS][oO][nN]*'; show "$out"
     section "URLs in JSON config (remote MCP servers, hook endpoints)"
-    show "$(grep -rInE '"(url|endpoint|serverUrl)"[[:space:]]*:' --include='*.[jJ][sS][oO][nN]*' . 2>/dev/null)"
+    g -rInE '"(url|endpoint|serverUrl)"[[:space:]]*:' --include='*.[jJ][sS][oO][nN]*'; show "$out"
     section "Hooks and tool grants in Markdown frontmatter"
-    show "$(grep -rInE '^(hooks|allowed-tools|allowedTools)[[:space:]]*:' --include='*.[mM][dD]*' . 2>/dev/null)"
+    g -rInE '^(hooks|allowed-tools|allowedTools)[[:space:]]*:' --include='*.[mM][dD]*'; show "$out"
     section "Shell lines in skills and commands (!\`...\`)"
-    show "$(grep -rInE '!`' --include='*.[mM][dD]*' . 2>/dev/null)"
+    g -rInE '!`' --include='*.[mM][dD]*'; show "$out"
     section "Suspicious text (review each)"
-    hits="$(grep -rIinE 'curl[^|]*\|[[:space:]]*(ba|z)?sh|wget[^|]*\|[[:space:]]*(ba|z)?sh|base64[[:space:]]+(-d|--decode)|ignore (all )?(previous|prior|above) instructions|do not (tell|inform|mention)[^.]* (the )?user|\.ssh/|\.aws/credentials|id_rsa|/etc/passwd|nc[[:space:]]+-e|bash[[:space:]]+-i[[:space:]]*>|dangerously-?skip-?permissions|bypassPermissions' . 2>/dev/null)"
-    show "$hits"
-    [ -z "$hits" ] ) || rc=1
-  return "$rc"
+    g -rIinE 'curl[^|]*\|[[:space:]]*(ba|z)?sh|wget[^|]*\|[[:space:]]*(ba|z)?sh|base64[[:space:]]+(-d|--decode)|ignore (all )?(previous|prior|above) instructions|do not (tell|inform|mention)[^.]* (the )?user|\.ssh/|\.aws/credentials|id_rsa|/etc/passwd|nc[[:space:]]+-e|bash[[:space:]]+-i[[:space:]]*>|dangerously-?skip-?permissions|bypassPermissions'
+    hits="$out"; show "$hits"
+    if [ "$err" = 1 ]; then echo; echo "ERROR: some quarantined files could not be read; this report is incomplete"; exit 2; fi
+    [ -z "$hits" ] )
 }
 
 open_one() {
@@ -352,7 +411,10 @@ case "$CMD" in
 esac
 [ -n "$TARGET" ] || die "PATH is required"
 [ -d "$TARGET" ] || die "'$TARGET' is not a directory"
-TARGET="$(cd "$TARGET" && pwd -P)"   # physical path: find does not descend a symlinked root
+# Physical path (find does not descend a symlinked root). The x sentinel keeps
+# a trailing newline in a folder name from being stripped.
+TARGET="$(cd "$TARGET" && pwd -P && echo x)" || die "cannot enter '$TARGET'"
+TARGET="${TARGET%x}"; TARGET="${TARGET%$'\n'}"
 [ "$TARGET" = / ] || [ "$TARGET" = "$(cd "$HOME" && pwd -P)" ] && die "refusing to act on $TARGET; name a repo or use --each on its parent"
 
 if [ "$EACH" = 1 ]; then

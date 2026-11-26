@@ -17,7 +17,8 @@
 #   4. OPTIONAL behavioral     (socket)     - only if installed AND logged in
 #
 # Exit code: 0 = nothing flagged, 1 = at least one tool reported findings,
-#            2 = usage / setup error.
+#            2 = usage / setup error, 3 = agent files could not be quarantined
+#            (scan stopped; do not read files under PATH with an agent).
 #
 # A full combined log is written to:  <PATH>/.scan-reports/scan-<timestamp>.log
 #
@@ -31,7 +32,7 @@ for a in "$@"; do
   case "$a" in
     --quick) QUICK=1 ;;
     --no-quarantine) QUARANTINE=0 ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
     *) TARGET="$a" ;;
   esac
 done
@@ -53,6 +54,11 @@ TARGET="$(cd "$TARGET" && pwd)"   # absolutize
 
 TS="$(date +%Y-%m-%d_%H%M%S)"
 REPORTDIR="$TARGET/.scan-reports"
+# The scanned tree controls this name: a symlink would send the log elsewhere.
+if [ -L "$REPORTDIR" ] || { [ -e "$REPORTDIR" ] && [ ! -d "$REPORTDIR" ]; }; then
+  echo "scan-download: '$REPORTDIR' is a symlink or not a folder; refusing to write reports through it" >&2
+  exit 2
+fi
 mkdir -p "$REPORTDIR"
 LOG="$REPORTDIR/scan-$TS.log"
 
@@ -176,31 +182,31 @@ section "LAYER 0  AGENT CONFIG  (agent-quarantine)"
 # instructions. Move them aside before anything reads the tree, then report
 # what they would do. They stay quarantined; `agent-quarantine restore` undoes it.
 AQ="$(cd "$(dirname "$0")" && pwd)/agent-quarantine"
+# stop_unquarantined <why> : agent files may be live, so nothing may read the
+# target. Exit 3 tells the caller not to open the log under the target either.
+stop_unquarantined() {
+  printf '  %sagent-config: %s%s\n' "$c_bad" "$1" "$c_off"
+  printf '\n%sSTOPPED: agent files in %s may still be live. Do not read files under it\n' "$c_bad" "$TARGET"
+  printf 'with an agent. Fix the problem above and scan again, or pass --no-quarantine.%s\n' "$c_off"
+  exit 3
+}
 if [ "$QUARANTINE" = 0 ]; then
   skip "agent-config" "--no-quarantine"
 elif [ ! -f "$AQ" ]; then
-  # Fail closed: without the quarantine, the repo's agent files are live.
-  set_result agent-config FINDINGS
-  printf '  %sagent-config: agent-quarantine MISSING beside scan-download - agent files NOT quarantined%s
-' "$c_bad" "$c_off"
+  stop_unquarantined "agent-quarantine is missing beside scan-download"
 else
   printf '\n--- agent-quarantine quarantine ---\n' >>"$LOG"
   "$BASH" "$AQ" quarantine "$TARGET" 2>&1 | tee -a "$LOG" | sed 's/^/  /'
   q_rc="${PIPESTATUS[0]}"
+  [ "$q_rc" = 0 ] || stop_unquarantined "quarantine failed (exit $q_rc); see the messages above"
   printf '\n--- agent-quarantine report ---\n' >>"$LOG"
   "$BASH" "$AQ" report "$TARGET" >>"$LOG" 2>&1; aq_rc=$?
-  # Fail closed: if anything could not be moved, agent files may still be live.
-  if [ "$q_rc" != 0 ]; then
-    set_result agent-config FINDINGS
-    printf '  %sagent-config: QUARANTINE FAILED (exit %s) - agent files may still be live; see log%s\n' "$c_bad" "$q_rc" "$c_off"
-  else
-    case "$aq_rc" in
-      0) set_result agent-config CLEAN;    printf '  %sagent-config: nothing suspicious (inventory in log)%s\n' "$c_ok" "$c_off" ;;
-      1) set_result agent-config FINDINGS; printf '  %sagent-config: SUSPICIOUS TEXT in agent files (see log)%s\n' "$c_bad" "$c_off" ;;
-      *) set_result agent-config FINDINGS
-         printf '  %sagent-config: report failed (exit %s); see log%s\n' "$c_bad" "$aq_rc" "$c_off" ;;
-    esac
-  fi
+  case "$aq_rc" in
+    0) set_result agent-config CLEAN;    printf '  %sagent-config: nothing suspicious (inventory in log)%s\n' "$c_ok" "$c_off" ;;
+    1) set_result agent-config FINDINGS; printf '  %sagent-config: SUSPICIOUS TEXT in agent files (see log)%s\n' "$c_bad" "$c_off" ;;
+    *) set_result agent-config FINDINGS
+       printf '  %sagent-config: report incomplete, a quarantined file could not be read (exit %s); see log%s\n' "$c_bad" "$aq_rc" "$c_off" ;;
+  esac
 fi
 
 # =========================================================================

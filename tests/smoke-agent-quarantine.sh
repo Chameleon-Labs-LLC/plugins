@@ -9,6 +9,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 AQ="$HERE/../scan-source/skills/scan-source/scripts/agent-quarantine"
 
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
+export AGENT_QUARANTINE_STATE="$W/state"   # the journal lives outside the repo
 R="$W/repos/foo"
 mkdir -p "$R/.git/info" "$R/.claude/skills/x" "$R/sub" "$R/.github/workflows" \
          "$R/node_modules/pkg" "$R/src"
@@ -55,6 +56,8 @@ check   "README stays"                                 test -f "$R/README.md"
 check   "stored with the suffix"                       test -f "$R/.agent-quarantine/CLAUDE.md.quarantined"
 check   "inner CLAUDE.md suffixed too"                 test -f "$R/.agent-quarantine/.claude.quarantined/CLAUDE.md.quarantined"
 nocheck "no loadable name inside the quarantine"       test -e "$R/.agent-quarantine/.claude.quarantined/CLAUDE.md"
+check   "journal kept outside the repo"                 test -n "$(ls "$W/state"/*.tsv 2>/dev/null)"
+nocheck "no manifest inside the repo"                  test -e "$R/.agent-quarantine/MANIFEST.tsv"
 check   "git exclude lists the quarantine"             grep -qxF '/.agent-quarantine/' "$R/.git/info/exclude"
 check   "status: nothing live"                         "$BASH" "$AQ" status "$R"
 
@@ -85,11 +88,14 @@ check   "tree identical to the start"                  test "$before" = "$after"
 
 out="$("$BASH" "$AQ" quarantine "$W/repos" 2>&1)"; rc=$?
 check   "a folder of repos needs --each"               test "$rc" = 2
-"$BASH" "$AQ" quarantine --each "$W/repos" >/dev/null 2>&1
-check   "--each quarantines every repo"                test -f "$W/repos/bar/.agent-quarantine/GEMINI.md.quarantined"
+"$BASH" "$AQ" quarantine --each "$W/repos" >/dev/null 2>&1; rc=$?
+check   "--each quarantine exits 0"                    test "$rc" = 0
+check   "--each quarantines bar"                       test -f "$W/repos/bar/.agent-quarantine/GEMINI.md.quarantined"
+check   "--each quarantines foo"                       test -f "$R/.agent-quarantine/CLAUDE.md.quarantined"
 "$BASH" "$AQ" restore --each "$W/repos" >/dev/null 2>&1; rc=$?
 check   "--each restore exits 0"                       test "$rc" = 0
-check   "--each restore puts files back"               test -f "$W/repos/bar/GEMINI.md"
+check   "--each restore puts bar back"                 test -f "$W/repos/bar/GEMINI.md"
+check   "--each restore puts foo back"                 test -f "$R/CLAUDE.md"
 
 # Review findings (council, neon): no name-based hiding places, forged
 # manifests cannot reach outside the repo, suspicious text is case-insensitive.
@@ -106,13 +112,16 @@ check   "status: nothing live after the hiding test"   "$BASH" "$AQ" status "$H"
 "$BASH" "$AQ" report "$H" >/dev/null 2>&1; rc=$?
 check   "uppercase curl|bash is flagged"               test "$rc" = 1
 
-E="$W/forged"; mkdir -p "$E/.agent-quarantine" "$W/outside"
-echo keep >"$E/.agent-quarantine/x"
-printf '../outside/pwned\t.agent-quarantine/x\n/tmp/abs\t.agent-quarantine/x\n' >"$E/.agent-quarantine/MANIFEST.tsv"
+E="$W/forged"; mkdir -p "$E/.agent-quarantine" "$E/docs" "$W/outside"
+echo keep >"$E/.agent-quarantine/x"; echo doc >"$E/docs/readme.txt"
+printf '# h
+../outside/pwned	.agent-quarantine/x
+docs/moved.txt	docs/readme.txt
+' >"$E/.agent-quarantine/MANIFEST.tsv"
 "$BASH" "$AQ" restore "$E" >/dev/null 2>&1; rc=$?
-check   "forged manifest: restore exits 1"             test "$rc" = 1
-nocheck "forged manifest wrote nothing outside"        test -e "$W/outside/pwned"
-check   "forged manifest left the store alone"         test -f "$E/.agent-quarantine/x"
+check   "shipped manifest: restore has nothing to do"  test "$rc" = 0
+nocheck "shipped manifest wrote nothing outside"       test -e "$W/outside/pwned"
+check   "shipped manifest moved no project file"       test -f "$E/docs/readme.txt"
 
 L="$W/linked"; mkdir -p "$L"; ln -s "$W/outside" "$L/sub"; echo x >"$W/outside/CLAUDE.md"
 "$BASH" "$AQ" quarantine "$L" >/dev/null 2>&1
@@ -124,13 +133,31 @@ check   "symlinked store: CLAUDE.md not moved out"     test -f "$S2/CLAUDE.md"
 
 # Second council round: .git is off limits, a symlinked target is resolved,
 # a planted manifest temp symlink is not followed, no-arg runs do not crash.
-G="$W/githook"; mkdir -p "$G/.git/hooks" "$G/.agent-quarantine"
-echo 'evil' >"$G/.agent-quarantine/x"
-printf '.git/hooks/post-merge\t.agent-quarantine/x\n' >"$G/.agent-quarantine/MANIFEST.tsv"
-ln -s "$W/outside/clobbered" "$G/.agent-quarantine/MANIFEST.tsv.tmp"
-"$BASH" "$AQ" restore "$G" >/dev/null 2>&1
-nocheck "forged manifest cannot plant a git hook"      test -e "$G/.git/hooks/post-merge"
-nocheck "planted .tmp symlink not followed"            test -e "$W/outside/clobbered"
+# A folder on the restore path that became a symlink (say, after a pull)
+# must not redirect the move, into .git or anywhere else.
+G="$W/githook"; mkdir -p "$G/.git/hooks" "$G/sub"; echo x >"$G/sub/CLAUDE.md"
+"$BASH" "$AQ" quarantine "$G" >/dev/null 2>&1
+rmdir "$G/sub"; ln -s .git/hooks "$G/sub"
+"$BASH" "$AQ" restore "$G" >/dev/null 2>&1; rc=$?
+check   "symlinked parent: restore exits 1"            test "$rc" = 1
+nocheck "symlinked parent: nothing written into .git"  test -e "$G/.git/hooks/CLAUDE.md"
+check   "symlinked parent: copy kept in quarantine"    test -f "$G/.agent-quarantine/sub/CLAUDE.md.quarantined"
+
+# A folder kept in quarantine keeps its inner renames (CodeRabbit).
+K="$W/keepdir"; mkdir -p "$K/.claude"; echo mem >"$K/.claude/CLAUDE.md"
+"$BASH" "$AQ" quarantine "$K" >/dev/null 2>&1
+mkdir -p "$K/.claude"; echo unrelated >"$K/.claude/CLAUDE.md.quarantined"
+"$BASH" "$AQ" restore "$K" >/dev/null 2>&1
+check   "kept folder: unrelated file not renamed"      grep -qx unrelated "$K/.claude/CLAUDE.md.quarantined"
+nocheck "kept folder: no CLAUDE.md conjured"           test -e "$K/.claude/CLAUDE.md"
+
+# A path that starts with # is a move, not a comment (CodeRabbit).
+P="$W/hash"; mkdir -p "$P/#docs"; echo h >"$P/#docs/CLAUDE.md"
+"$BASH" "$AQ" quarantine "$P" >/dev/null 2>&1
+"$BASH" "$AQ" restore "$P" >/dev/null 2>&1; rc=$?
+check   "# path: restore exits 0"                      test "$rc" = 0
+check   "# path: file restored"                        test -f "$P/#docs/CLAUDE.md"
+
 mkdir -p "$W/real"; echo x >"$W/real/CLAUDE.md"; ln -s "$W/real" "$W/via-link"
 "$BASH" "$AQ" quarantine "$W/via-link" >/dev/null 2>&1
 nocheck "symlinked target is still quarantined"        test -e "$W/real/CLAUDE.md"

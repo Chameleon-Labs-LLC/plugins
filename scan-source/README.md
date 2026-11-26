@@ -48,7 +48,8 @@ bash skills/scan-source/scripts/scan-download --quick /path/to/repo # skip Semgr
 ```
 
 A full log is written to `<repo>/.scan-reports/scan-<timestamp>.log`. Exit code:
-`0` = clean, `1` = findings present, `2` = usage error.
+`0` = clean, `1` = findings present, `2` = usage error, `3` = agent files could not
+be quarantined (scan stopped).
 
 ## Quarantining agent instructions in third-party repos
 
@@ -60,8 +61,9 @@ scanning a repo with an agent would otherwise load the repo's own instructions.
 
 `agent-quarantine` moves them into `<repo>/.agent-quarantine/` (each name gets a
 `.quarantined` suffix, so no agent CLI recognizes it) while the scanners still read
-every file. Every move is recorded in `.agent-quarantine/MANIFEST.tsv`, and
-`restore` puts everything back exactly.
+every file. Every move is recorded in a journal outside the repo
+(`~/.local/state/agent-quarantine/`, or `$AGENT_QUARANTINE_STATE`), so a repo cannot
+ship a forged one, and `restore` puts everything back exactly.
 
 ```bash
 A=skills/scan-source/scripts/agent-quarantine
@@ -75,11 +77,14 @@ bash $A restore /path/to/repo              # put everything back
 
 Each command prints the quarantine folder, a `file://` link, and under WSL an
 `explorer.exe '<path>'` command that works the same from WSL and PowerShell.
+`--each` acts on every direct subfolder except hidden and symlinked ones.
 
-Files stay quarantined after a scan. Restore before `git pull` (git refuses to
-update tracked files that are missing), then quarantine again. If a pull brings a
-file back, `restore` keeps the quarantined copy instead of overwriting it.
-`scan-download --no-quarantine` skips this layer.
+Files stay quarantined after a scan. Restore before a `git pull` that may update
+them (git refuses to update a tracked file that is missing), then quarantine
+again. If a file exists again where it came from, `restore` keeps the quarantined
+copy and reports a conflict instead of overwriting: compare the two, delete the
+one you don't want, and run `restore` again. `scan-download --no-quarantine`
+skips this layer; if the quarantine fails, `scan-download` stops with exit 3.
 
 ## Installing the tools
 
