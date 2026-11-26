@@ -4,6 +4,11 @@ Marketplace releases, newest first. Versions track `metadata.version` in
 `.claude-plugin/marketplace.json`; individual plugins version independently in
 their own `plugin.json`.
 
+## 0.6.0 — 2026-11-26
+
+- scan-source now moves a scanned repo's agent instruction files (`CLAUDE.md`, `AGENTS.md`, `.claude/`, `.mcp.json` and the other agent CLIs' files) into `<repo>/.agent-quarantine/` so no agent loads them, and reports the hooks, MCP servers and shell lines they hold.
+- New `agent-quarantine` command: `quarantine`, `restore`, `status`, `report`, `open`, with `--each` for a folder of repos; it prints an Explorer link under WSL.
+
 ## 0.5.1 — 2026-11-20
 
 - `screenshot-reader` 0.2.0: visual questions about screenshots go to a Sonnet reader.
