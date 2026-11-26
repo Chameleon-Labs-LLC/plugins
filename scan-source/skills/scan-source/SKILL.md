@@ -67,8 +67,10 @@ CPU (Intel or Apple silicon).
 **CRLF error:** `$'\r': command not found` or `set: pipefail: invalid option name`
 means that a Windows git clone with `core.autocrlf=true` converted the scripts to
 CRLF. The repo's `.gitattributes` prevents this on new clones. For an old clone, run
-an LF copy from your scratchpad: `tr -d '\r' < "$SKILL_DIR/scripts/scan-download" >
-<scratchpad>/scan-download`. Do not edit the plugin cache.
+LF copies of both scripts into one scratchpad folder, because `scan-download`
+runs the `agent-quarantine` beside it: `for s in scan-download agent-quarantine; do
+tr -d '\r' < "$SKILL_DIR/scripts/$s" > <scratchpad>/$s; done`. Do not edit the
+plugin cache.
 
 ### 1. Identify the target, then quarantine its agent files before anything else
 

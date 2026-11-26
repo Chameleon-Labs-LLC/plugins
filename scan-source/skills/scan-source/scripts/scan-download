@@ -179,7 +179,10 @@ AQ="$(cd "$(dirname "$0")" && pwd)/agent-quarantine"
 if [ "$QUARANTINE" = 0 ]; then
   skip "agent-config" "--no-quarantine"
 elif [ ! -f "$AQ" ]; then
-  skip "agent-config" "agent-quarantine script missing"
+  # Fail closed: without the quarantine, the repo's agent files are live.
+  set_result agent-config FINDINGS
+  printf '  %sagent-config: agent-quarantine MISSING beside scan-download - agent files NOT quarantined%s
+' "$c_bad" "$c_off"
 else
   printf '\n--- agent-quarantine quarantine ---\n' >>"$LOG"
   "$BASH" "$AQ" quarantine "$TARGET" 2>&1 | tee -a "$LOG" | sed 's/^/  /'

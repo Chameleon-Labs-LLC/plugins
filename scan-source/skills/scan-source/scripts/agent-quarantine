@@ -82,6 +82,8 @@ find_live() {
 safe_rel() {
   case "$1" in ''|/*|*$'\t'*|*$'\n'*) return 1 ;; esac
   case "/$1/" in */../*|*/./*|*//*) return 1 ;; esac
+  # Never into or out of git's own folder: a forged manifest could plant hooks.
+  case "$(printf '%s' "/$1/" | tr '[:upper:]' '[:lower:]')" in */.git/*) return 1 ;; esac
   return 0
 }
 
@@ -100,6 +102,10 @@ in_repo() {
 store_ok() {
   if [ -L "$1/$STORE_NAME" ] || [ -L "$1/$STORE_NAME/MANIFEST.tsv" ]; then
     warn "$1/$STORE_NAME or its MANIFEST.tsv is a symlink; refusing to use it"
+    return 1
+  fi
+  if exists "$1/$STORE_NAME/MANIFEST.tsv" && [ ! -f "$1/$STORE_NAME/MANIFEST.tsv" ]; then
+    warn "$1/$STORE_NAME/MANIFEST.tsv is not a regular file; refusing to use it"
     return 1
   fi
   if exists "$1/$STORE_NAME" && [ ! -d "$1/$STORE_NAME" ]; then
@@ -216,7 +222,7 @@ quarantine_one() {
 
 restore_one() {
   local repo="$1" store="$1/$STORE_NAME" manifest="$1/$STORE_NAME/MANIFEST.tsv"
-  local froms=() tos=() keep=() from to line i restored=0 kept=0 real
+  local froms=() tos=() keep=() from to line i restored=0 kept=0 real tmp
   store_ok "$repo" || return 1
   if [ ! -f "$manifest" ]; then echo "$repo: nothing quarantined"; return 0; fi
   real="$(cd "$repo" && pwd -P)"
@@ -246,12 +252,13 @@ restore_one() {
     i=$((i - 1))
   done
   if [ "$kept" -gt 0 ]; then
+    tmp="$(mktemp "$store/.manifest.XXXXXX")" || return 1   # never a planted path
     { printf '# agent-quarantine: one move per line, <from>TAB<to>, relative to the repo. restore replays it bottom-up.\n'
       i=0
       while [ "$i" -lt "${#froms[@]}" ]; do
         [ -n "${keep[$i]:-}" ] && printf '%s\t%s\n' "${froms[$i]}" "${tos[$i]}"
         i=$((i + 1))
-      done; } >"$manifest.tmp" && mv "$manifest.tmp" "$manifest"
+      done; } >"$tmp" && mv "$tmp" "$manifest"
     echo "$repo: restored $restored, kept $kept in quarantine"
     print_link "$store"
     return 1
@@ -330,7 +337,7 @@ open_one() {
 # ---- args ------------------------------------------------------------------
 CMD="${1:-}"; [ $# -gt 0 ] && shift
 EACH=0; TARGET=""
-for a in "$@"; do
+for a in ${1+"$@"}; do
   case "$a" in
     --each) EACH=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -345,8 +352,8 @@ case "$CMD" in
 esac
 [ -n "$TARGET" ] || die "PATH is required"
 [ -d "$TARGET" ] || die "'$TARGET' is not a directory"
-TARGET="$(cd "$TARGET" && pwd)"
-[ "$TARGET" = / ] || [ "$TARGET" = "$(cd "$HOME" && pwd)" ] && die "refusing to act on $TARGET; name a repo or use --each on its parent"
+TARGET="$(cd "$TARGET" && pwd -P)"   # physical path: find does not descend a symlinked root
+[ "$TARGET" = / ] || [ "$TARGET" = "$(cd "$HOME" && pwd -P)" ] && die "refusing to act on $TARGET; name a repo or use --each on its parent"
 
 if [ "$EACH" = 1 ]; then
   case "$CMD" in report|open) die "--each works with quarantine, restore and status" ;; esac

@@ -122,4 +122,21 @@ S2="$W/slink"; mkdir -p "$S2"; ln -s "$W/outside" "$S2/.agent-quarantine"; echo 
 check   "symlinked store is refused"                   test "$rc" = 1
 check   "symlinked store: CLAUDE.md not moved out"     test -f "$S2/CLAUDE.md"
 
+# Second council round: .git is off limits, a symlinked target is resolved,
+# a planted manifest temp symlink is not followed, no-arg runs do not crash.
+G="$W/githook"; mkdir -p "$G/.git/hooks" "$G/.agent-quarantine"
+echo 'evil' >"$G/.agent-quarantine/x"
+printf '.git/hooks/post-merge\t.agent-quarantine/x\n' >"$G/.agent-quarantine/MANIFEST.tsv"
+ln -s "$W/outside/clobbered" "$G/.agent-quarantine/MANIFEST.tsv.tmp"
+"$BASH" "$AQ" restore "$G" >/dev/null 2>&1
+nocheck "forged manifest cannot plant a git hook"      test -e "$G/.git/hooks/post-merge"
+nocheck "planted .tmp symlink not followed"            test -e "$W/outside/clobbered"
+mkdir -p "$W/real"; echo x >"$W/real/CLAUDE.md"; ln -s "$W/real" "$W/via-link"
+"$BASH" "$AQ" quarantine "$W/via-link" >/dev/null 2>&1
+nocheck "symlinked target is still quarantined"        test -e "$W/real/CLAUDE.md"
+"$BASH" "$AQ" >/dev/null 2>&1; rc=$?
+check   "no arguments: usage exit 2"                   test "$rc" = 2
+"$BASH" "$AQ" status >/dev/null 2>&1; rc=$?
+check   "no PATH: usage exit 2"                        test "$rc" = 2
+
 exit "$fail"
